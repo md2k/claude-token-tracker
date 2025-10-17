@@ -1,0 +1,16 @@
+# Binaries
+token-tracker
+*.exe
+*.out
+
+# Go
+*.test
+*.prof
+go.work
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
