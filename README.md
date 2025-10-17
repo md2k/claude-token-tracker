@@ -10,6 +10,8 @@ A lightweight Go daemon that tracks token usage for Claude Code sessions in real
 - **In-memory caching** for ultra-fast statusline queries (~1-2ms)
 - **Incremental parsing** - only processes new content
 - **Cache invalidation detection** - alerts when prompt cache expires and rebuilds
+- **Cache TTL countdown** - real-time countdown showing time until cache expiration with color-coded alerts
+- **Intelligent path truncation** - Powerlevel10k-style directory shortening
 - **Auto-cleanup** of inactive sessions
 - **Graceful shutdown** after idle timeout (default: 10 minutes)
 - **HTTP API** for easy integration
@@ -159,6 +161,7 @@ curl http://localhost:7777/shutdown
   - `cache_create_tokens`: Total cumulative tokens written to cache
   - `last_cache_create_tokens`: Tokens written in the most recent message
   - `cache_rebuilding`: Boolean indicating if cache is currently rebuilding
+  - `cache_last_read_timestamp`: Unix timestamp of last cache read (0 if no active cache)
 
 - **`GET /status`** - Daemon status and active sessions
   ```bash
@@ -213,12 +216,19 @@ const SHOW_DURATION = true;           // Session duration
 const SHOW_TOKENS_INPUT_OUTPUT = true; // Input/Output tokens
 const SHOW_CACHE_READ = true;         // Cache read tokens and efficiency
 const SHOW_CACHE_WRITE = true;        // Cache write tokens
+const SHOW_CACHE_TTL = false;         // Cache TTL countdown timer (daemon only)
+                                      // DISABLED: Claude Code v1.0.89+ removed statusline auto-refresh,
+                                      // so countdown timer only updates on interaction (not useful)
 const SHOW_LINES = true;              // Lines added/removed
 const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
 
 // Path Truncation Configuration
 const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
 const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
+
+// Cache TTL Configuration
+const CACHE_TTL_YELLOW = 120;         // Turn yellow at 2 minutes
+const CACHE_TTL_RED = 45;             // Turn red at 45 seconds
 ```
 
 Simply set any option to `false` to hide that section from your statusline.
@@ -292,6 +302,31 @@ The 🗂 indicator shows `cache_creation_input_tokens`:
 - **Total** (`150k`) - cumulative cache creation for the entire session
 
 **Note**: Fallback mode (ᶠ) shows only total cache write (`🗂  150kᶠ`) for better performance. Daemon mode (ᵈ) shows detailed breakdown (`🗂  +1.5k/150kᵈ`).
+
+### Cache TTL Countdown
+
+**⚠️ DISABLED (as of Claude Code v1.0.89+)**: This feature is currently disabled because Claude Code removed statusline auto-refresh. The countdown timer only updates during interaction, making it not useful as a real-time timer.
+
+The implementation remains in the code and can be re-enabled by setting `SHOW_CACHE_TTL = true` if auto-refresh is restored in future versions.
+
+<details>
+<summary>Feature Documentation (for reference)</summary>
+
+When enabled and cache is active in daemon mode, shows time remaining until expiration:
+
+- **`⏱ 4m30sᵈ`** - Green: More than 2 minutes remaining (safe)
+- **`⏱ 1m30sᵈ`** - Yellow: 45 seconds to 2 minutes remaining (warning)
+- **`⏱ 30sᵈ`** - Red: Less than 45 seconds remaining (critical)
+- **Full example**: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ 🗂  +1.5k/150kᵈ ⏱ 3m45sᵈ`
+
+Claude's prompt cache has a 5-minute TTL that refreshes when the cache is **read** (when you send a message and Claude responds using cached context). The daemon tracks the timestamp of the last cache read, and the statusline calculates the remaining time client-side on each refresh. The countdown uses 4.5 minutes (270 seconds) as a safety margin to account for latency.
+
+**Configuration:**
+- `SHOW_CACHE_TTL`: Enable/disable TTL countdown display (default: false)
+- `CACHE_TTL_YELLOW`: Seconds threshold for yellow warning (default: 120)
+- `CACHE_TTL_RED`: Seconds threshold for red critical alert (default: 45)
+
+</details>
 
 ## Font Requirements
 

@@ -27,21 +27,22 @@ type TokenUsage struct {
 
 // SessionTracker tracks a single transcript file
 type SessionTracker struct {
-	path                 string
-	lastSize             int64
-	lastModTime          time.Time
-	lastAccess           time.Time
-	startTime            time.Time
-	usage                TokenUsage
-	mu                   sync.RWMutex
-	watcher              *fsnotify.Watcher
-	stopChan             chan struct{}
-	stopped              bool
-	parseCount           int64
-	totalParseTime       time.Duration
-	cacheInvalidatedAt   time.Time
-	lastCacheReadTokens  int64
+	path                  string
+	lastSize              int64
+	lastModTime           time.Time
+	lastAccess            time.Time
+	startTime             time.Time
+	usage                 TokenUsage
+	mu                    sync.RWMutex
+	watcher               *fsnotify.Watcher
+	stopChan              chan struct{}
+	stopped               bool
+	parseCount            int64
+	totalParseTime        time.Duration
+	cacheInvalidatedAt    time.Time
+	lastCacheReadTokens   int64
 	lastCacheCreateTokens int64
+	lastCacheReadTime     time.Time
 }
 
 // Config holds daemon configuration
@@ -283,20 +284,29 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 	usage := tracker.usage
 	cacheInvalidatedAt := tracker.cacheInvalidatedAt
 	lastCacheCreate := tracker.lastCacheCreateTokens
+	lastCacheReadTime := tracker.lastCacheReadTime
 	tracker.mu.RUnlock()
 
 	// Check if cache is currently rebuilding
 	cacheRebuilding := !cacheInvalidatedAt.IsZero() &&
 		time.Since(cacheInvalidatedAt) < daemon.config.CacheRebuildAlertDuration
 
+	// Return timestamp of last cache read for client-side countdown calculation
+	// TTL is refreshed when cache is read (when user sends message and Claude responds)
+	var cacheLastReadTimestamp int64 = 0
+	if !lastCacheReadTime.IsZero() {
+		cacheLastReadTimestamp = lastCacheReadTime.Unix()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"input_tokens":            usage.InputTokens,
-		"output_tokens":           usage.OutputTokens,
-		"cache_read_tokens":       usage.CacheReadTokens,
-		"cache_create_tokens":     usage.CacheCreateTokens,
-		"last_cache_create_tokens": lastCacheCreate,
-		"cache_rebuilding":        cacheRebuilding,
+		"input_tokens":              usage.InputTokens,
+		"output_tokens":             usage.OutputTokens,
+		"cache_read_tokens":         usage.CacheReadTokens,
+		"cache_create_tokens":       usage.CacheCreateTokens,
+		"last_cache_create_tokens":  lastCacheCreate,
+		"cache_rebuilding":          cacheRebuilding,
+		"cache_last_read_timestamp": cacheLastReadTimestamp,
 	})
 }
 
@@ -533,6 +543,13 @@ func (t *SessionTracker) parseFile() error {
 				logger.Printf("Cache invalidation detected for %s: %d tokens dropped (was %d, now %d)",
 					t.path, drop, t.lastCacheReadTokens, cacheRead)
 			}
+		}
+
+		// Track when cache was last read (for TTL countdown)
+		// Cache TTL is refreshed when cache is READ (when user sends message), not written
+		// Only update timestamp when we see a NEW cache_read value (different from last)
+		if cacheRead > 0 && cacheRead != t.lastCacheReadTokens {
+			t.lastCacheReadTime = time.Now()
 		}
 
 		// Update last cache read value for next comparison

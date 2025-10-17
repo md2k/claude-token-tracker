@@ -42,12 +42,19 @@ const SHOW_DURATION = true;           // Session duration
 const SHOW_TOKENS_INPUT_OUTPUT = true; // Input/Output tokens
 const SHOW_CACHE_READ = true;         // Cache read tokens and efficiency
 const SHOW_CACHE_WRITE = true;        // Cache write tokens
+const SHOW_CACHE_TTL = false;         // Cache TTL countdown timer (daemon only)
+                                      // DISABLED: Claude Code v1.0.89+ removed statusline auto-refresh,
+                                      // so countdown timer only updates on interaction (not useful)
 const SHOW_LINES = true;              // Lines added/removed
 const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
 
 // Path Truncation Configuration
 const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
 const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
+
+// Cache TTL Configuration
+const CACHE_TTL_YELLOW = 120;         // Turn yellow at 2 minutes
+const CACHE_TTL_RED = 45;             // Turn red at 45 seconds
 
 // Helper function to check daemon health
 function checkDaemonHealth() {
@@ -134,6 +141,7 @@ function parseTokensDirectly(path) {
 let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreate = 0, lastCacheCreate = 0;
 let tokenStatus = 'ok'; // 'ok', 'starting', 'fallback', 'unavailable'
 let cacheRebuilding = false;
+let cacheLastReadTimestamp = 0;
 
 if (transcriptPath) {
   // Try to get tokens from daemon
@@ -179,6 +187,7 @@ if (transcriptPath) {
     totalCacheCreate = tokens.cache_create_tokens || 0;
     lastCacheCreate = tokens.last_cache_create_tokens || 0;
     cacheRebuilding = tokens.cache_rebuilding || false;
+    cacheLastReadTimestamp = tokens.cache_last_read_timestamp || 0;
   } else if (tokenStatus === 'starting') {
     // Keep starting status
   } else {
@@ -335,6 +344,33 @@ if (tokenStatus === 'starting') {
         output += ` ${esc('38;5;147')}🗂  +${fmt(lastCacheCreate)}${esc('2')}/${esc('0')}${esc('38;5;147')}${fmt(totalCacheCreate)}${indicator}${esc('0')}`;
       } else {
         output += ` ${esc('38;5;147')}🗂  ${fmt(totalCacheCreate)}${indicator}${esc('0')}`;
+      }
+    }
+
+    // Cache TTL countdown (daemon only)
+    if (SHOW_CACHE_TTL && tokenStatus === 'ok' && cacheLastReadTimestamp > 0) {
+      // Calculate remaining time client-side (real-time countdown)
+      // 270 seconds = 4.5 minutes (5 min TTL with safety margin)
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const elapsed = nowSeconds - cacheLastReadTimestamp;
+      const remaining = 270 - elapsed;
+
+      if (remaining > 0) {
+        const minutes = Math.floor(remaining / 60);
+        const seconds = remaining % 60;
+        const timeStr = minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`;
+
+        // Color gradient based on time remaining
+        let ttlColor;
+        if (remaining > CACHE_TTL_YELLOW) {
+          ttlColor = '82';  // Green
+        } else if (remaining > CACHE_TTL_RED) {
+          ttlColor = '226'; // Yellow
+        } else {
+          ttlColor = '196'; // Red
+        }
+
+        output += ` ${esc(`38;5;${ttlColor}`)}⏱ ${timeStr}${indicator}${esc('0')}`;
       }
     }
   }
