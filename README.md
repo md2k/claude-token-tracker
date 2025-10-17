@@ -215,9 +215,34 @@ const SHOW_CACHE_READ = true;         // Cache read tokens and efficiency
 const SHOW_CACHE_WRITE = true;        // Cache write tokens
 const SHOW_LINES = true;              // Lines added/removed
 const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
+
+// Path Truncation Configuration
+const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
+const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
 ```
 
 Simply set any option to `false` to hide that section from your statusline.
+
+### Path Truncation
+
+The statusline intelligently truncates long directory paths (inspired by Powerlevel10k):
+
+**Strategy:**
+- Keeps project/workspace name full
+- Truncates parent directories to first letter
+- Keeps current directory (last segment) full
+- If still too long, truncates project name with ellipsis
+
+**Examples:**
+```
+~/git/user/claude-token-counter                 → ~/git/user/claude-token-counter
+~/git/user/claude-token-counter/src/components  → ~/g/u/claude-token-counter/s/components
+~/git/user/my-very-long-project-name/src/...    → ~/g/u/my-very-long-project-…/s/c/buttons
+```
+
+**Configuration:**
+- `PATH_MAX_LENGTH`: Maximum characters (default: 40)
+- `PATH_SHORTEN_STRATEGY`: Enable/disable truncation (default: true)
 
 ### Example: Minimal Statusline
 

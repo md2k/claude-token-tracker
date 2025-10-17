@@ -45,6 +45,10 @@ const SHOW_CACHE_WRITE = true;        // Cache write tokens
 const SHOW_LINES = true;              // Lines added/removed
 const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
 
+// Path Truncation Configuration
+const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
+const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
+
 // Helper function to check daemon health
 function checkDaemonHealth() {
   try {
@@ -186,10 +190,58 @@ if (transcriptPath) {
 const fmt = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}m` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : n;
 const esc = (code) => `\x1b[${code}m`;
 
+// Intelligent path truncation (Powerlevel10k style)
+function truncatePath(path, maxLength) {
+  if (!PATH_SHORTEN_STRATEGY || path.length <= maxLength) {
+    return path;
+  }
+
+  const segments = path.split('/').filter(s => s !== ''); // Remove empty segments
+  if (segments.length <= 2) return path; // Don't truncate simple paths like ~/foo
+
+  // Find the important segment (project name) - usually the longest segment in the middle
+  // Exclude first segment (~) and last segment (current dir)
+  let importantIndex = 1; // Default to second segment
+  let maxLen = 0;
+
+  // Find longest segment between index 1 and length-2 (likely the project name)
+  for (let i = 1; i < Math.min(segments.length - 1, 4); i++) {
+    if (segments[i].length > maxLen) {
+      maxLen = segments[i].length;
+      importantIndex = i;
+    }
+  }
+
+  // Truncate segments
+  const truncated = segments.map((seg, i) => {
+    if (i === 0) return seg; // Keep first segment (~ or /)
+    if (i === importantIndex) return seg; // Keep important segment (project name) full
+    if (i === segments.length - 1) return seg; // Keep last segment (current dir) full
+    return seg[0] || seg; // Truncate middle segments to first letter
+  });
+
+  let result = truncated.join('/');
+
+  // If still too long, truncate the important segment
+  if (result.length > maxLength && importantIndex < segments.length) {
+    const important = segments[importantIndex];
+    if (important.length > 10) {
+      const maxImportantLen = Math.max(8, maxLength - (result.length - important.length) - 1);
+      truncated[importantIndex] = important.substring(0, maxImportantLen) + '…';
+      result = truncated.join('/');
+    }
+  }
+
+  return result;
+}
+
 // Calculate relative path
 let relPath = cwd.replace(project, '');
 if (relPath === cwd) relPath = cwd.replace(process.env.HOME, '~');
 if (relPath === cwd) relPath = '.';
+
+// Apply path truncation
+relPath = truncatePath(relPath, PATH_MAX_LENGTH);
 
 // Get git info
 let gitBranch = '', gitStatus = '';
