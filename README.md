@@ -16,6 +16,7 @@ A lightweight Go daemon that tracks token usage for Claude Code sessions in real
 - **Graceful shutdown** after idle timeout (default: 10 minutes)
 - **HTTP API** for easy integration
 - **Detailed metrics** including parse times and file statistics
+- **Transcript analyzer** - Python script for detailed per-message analysis, cache events, and cost tracking
 
 ## Requirements
 
@@ -397,6 +398,106 @@ curl http://localhost:7777/metrics | jq
 # Monitor idle timeout
 watch -n 1 'curl -s http://localhost:7777/metrics | jq ".idle_for"'
 ```
+
+## Transcript Analyzer
+
+The `analyze_transcript.py` script provides detailed analysis of Claude Code transcript files, showing per-message token usage, cache events, and cost breakdowns.
+
+### Features
+
+- **Per-message token tracking** - Single-line table format showing usage per message
+- **Cache event detection** - Identifies cache start, reads, invalidations, and growth
+- **Per-model breakdown** - Tracks usage across different models (Sonnet, Haiku, Opus)
+- **Cost calculation** - Accurate pricing with 5-minute cache TTL rates
+- **Cache efficiency** - Shows savings from prompt caching
+- **Mixed-model support** - Handles sessions using multiple models
+
+### Usage
+
+```bash
+# Basic usage
+python3 analyze_transcript.py ~/.claude/transcripts/session-123.jsonl
+
+# Or using the installed script
+./analyze_transcript.py ~/.claude/transcripts/session-123.jsonl
+```
+
+### Example Output
+
+```
+Analyzing: ~/.claude/transcripts/session-123.jsonl
+
+ Msg#    Input   Output   CacheR   CacheC      Ctx    Eff% Event
+==================================================================================================================================
+    1      552      216        0        0      552       -
+    2        4        1        0    15.6k      556       - 🆕 CACHE START
+    3        8      423    15.6k    16.1k      564   99.95 ⚡ CACHE READ
+  ...
+  804        8        6   109.0k   109.8k    31.7k   99.99
+  805       10        6        0   109.8k   31.7k       - 🔄 INVALIDATION (↓109.0k)
+  ...
+==================================================================================================================================
+
+SUMMARY:
+Total Messages: 1172
+
+Input Tokens:
+  Fresh (non-cached): 37.5k
+  From Cache:         146.7m
+  TOTAL INPUT:        146.7m
+
+Output Tokens:        97.2k
+Cache Written:        1.6m
+
+Note: 'Ctx' column shows cumulative fresh input tokens (running total)
+
+Cache Efficiency: 99.97%
+
+==================================================================================================================================
+
+PER-MODEL BREAKDOWN & COSTS:
+
+claude-3-5-haiku-20250110:
+  Messages: 368
+  Input:    298.4k
+  Output:   5.0k
+  Cache R:  0
+  Cache W:  2.1k
+  Cost:     $0.2609
+
+claude-sonnet-4-5-20250929:
+  Messages: 804
+  Input:    2.0k
+  Output:   88.9k
+  Cache R:  14.6m
+  Cache W:  1.4m
+  Cost:     $10.97
+
+TOTAL COST:         $11.23
+=                   $11.23
+
+Cost without cache:  $54.76
+Savings from cache:  $43.53 (79.5%)
+```
+
+### Column Descriptions
+
+- **Msg#** - Message number in session
+- **Input** - Fresh input tokens (non-cached)
+- **Output** - Output tokens from Claude's response
+- **CacheR** - Cache read tokens (retrieved from cache)
+- **CacheC** - Cache creation tokens (written to cache)
+- **Ctx** - Cumulative fresh input tokens
+- **Eff%** - Cache efficiency for this message
+- **Event** - Cache events (🆕 START, ⚡ READ, 🔄 INVALIDATION, 📈 GROWTH)
+
+### Use Cases
+
+- **Debug cache invalidation** - See exactly when and why cache expires
+- **Analyze token usage patterns** - Understand how tokens accumulate
+- **Cost tracking** - Compare actual costs vs without caching
+- **Mixed-model analysis** - Track usage across Haiku and Sonnet
+- **Session auditing** - Review complete token usage history
 
 ## Integration
 
