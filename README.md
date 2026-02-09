@@ -154,8 +154,13 @@ curl http://localhost:7777/shutdown
   #   "output_tokens": 70997,
   #   "cache_read_tokens": 17891893,
   #   "cache_create_tokens": 1582021,
+  #   "cache_tier_5m_tokens": 1580000,
+  #   "cache_tier_1h_tokens": 2021,
+  #   "web_search_count": 3,
+  #   "web_fetch_count": 2,
   #   "last_cache_create_tokens": 1523,
-  #   "cache_rebuilding": false
+  #   "cache_rebuilding": false,
+  #   "cache_last_read_timestamp": 1770640116
   # }
   ```
 
@@ -164,6 +169,10 @@ curl http://localhost:7777/shutdown
   - `output_tokens`: Claude's response tokens
   - `cache_read_tokens`: Tokens retrieved from cache (savings)
   - `cache_create_tokens`: Total cumulative tokens written to cache
+  - `cache_tier_5m_tokens`: Tokens written to the 5-minute ephemeral cache tier
+  - `cache_tier_1h_tokens`: Tokens written to the 1-hour ephemeral cache tier
+  - `web_search_count`: Cumulative web search requests made by server tools
+  - `web_fetch_count`: Cumulative web fetch requests made by server tools
   - `last_cache_create_tokens`: Tokens written in the most recent message
   - `cache_rebuilding`: Boolean indicating if cache is currently rebuilding
   - `cache_last_read_timestamp`: Unix timestamp of last cache read (0 if no active cache)
@@ -206,37 +215,50 @@ curl http://localhost:7777/shutdown
   # {"status":"shutting down"}
   ```
 
+## Statusline Layout
+
+The statusline uses a 2-line layout:
+
+**Line 1 — Identity, Context, Cost & Location**
+```
+Sonnet 4.5 │ 200k ctx │ 🤖 agent │ $0.4521 │ 45m12s (API: 12m08s) │ 01fe6720-...81f9016365a7 │ ~/g/F/a/claude-chatplace │  main ✚2
+```
+
+**Line 2 — Progress Bar, Tokens & Metrics**
+```
+▓▓▓▓▓▓░░░░░░░░░░░░░░ 28% │ 676↓ 21k↑ᵈ │ ⚡9.0m (99.99%)ᵈ 🗂 ⚡1.1m(5m) 0(1h)ᵈ │ 🔍3 📥2 │ +156 -23
+```
+
+### Progress Bar Colors
+
+The progress bar uses color-coded 20% bands based on context window usage:
+- **0-19%**: Cyan — plenty of room
+- **20-39%**: Green — comfortable
+- **40-59%**: Yellow — moderate usage
+- **60-79%**: Orange — getting full
+- **80-100%**: Red — nearly full
+
+### New Fields
+
+- **Context window size** (`200k ctx`): from `context_window.context_window_size`
+- **API duration** (`API: 12m08s`): from `cost.total_api_duration_ms`
+- **Session ID** (truncated): from `session_id`
+- **Agent name** (`🤖 agent`): from `agent.name` (shown only when present)
+- **Cache tier breakdown** (`🗂 ⚡1.1m(5m) 0(1h)ᵈ`): ephemeral 5-minute and 1-hour cache tiers
+- **Web search/fetch** (`🔍3 📥2`): cumulative web search and fetch request counts
+
 ## Customization
 
-You can customize which sections appear in your statusline by editing `~/.claude/statusline.mjs`. At the top of the file, you'll find the Display Configuration section:
+You can customize the statusline by editing `~/.claude/statusline.mjs`. Configuration options at the top of the file:
 
 ```javascript
-// Display Configuration - Set to false to hide sections
-const SHOW_MODEL = true;              // Model name (e.g., "Sonnet 4.5")
-const SHOW_PATH = true;               // Current directory path
-const SHOW_GIT = true;                // Git branch and status
-const SHOW_STYLE = true;              // Output style name
-const SHOW_COST = true;               // Cost in USD
-const SHOW_DURATION = true;           // Session duration
-const SHOW_TOKENS_INPUT_OUTPUT = true; // Input/Output tokens
-const SHOW_CACHE_READ = true;         // Cache read tokens and efficiency
-const SHOW_CACHE_WRITE = true;        // Cache write tokens
-const SHOW_CACHE_TTL = false;         // Cache TTL countdown timer (daemon only)
-                                      // DISABLED: Claude Code v1.0.89+ removed statusline auto-refresh,
-                                      // so countdown timer only updates on interaction (not useful)
-const SHOW_LINES = true;              // Lines added/removed
-const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
-
 // Path Truncation Configuration
 const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
 const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
 
-// Cache TTL Configuration
-const CACHE_TTL_YELLOW = 120;         // Turn yellow at 2 minutes
-const CACHE_TTL_RED = 45;             // Turn red at 45 seconds
+// Progress Bar Configuration
+const BAR_WIDTH = 20;                 // Width of the context window progress bar
 ```
-
-Simply set any option to `false` to hide that section from your statusline.
 
 ### Path Truncation
 
@@ -259,23 +281,17 @@ The statusline intelligently truncates long directory paths (inspired by Powerle
 - `PATH_MAX_LENGTH`: Maximum characters (default: 40)
 - `PATH_SHORTEN_STRATEGY`: Enable/disable truncation (default: true)
 
-### Example: Minimal Statusline
+### Cache Tier Breakdown
 
-```javascript
-const SHOW_MODEL = false;
-const SHOW_PATH = false;
-const SHOW_GIT = false;
-const SHOW_STYLE = false;
-const SHOW_COST = false;
-const SHOW_DURATION = false;
-const SHOW_TOKENS_INPUT_OUTPUT = true;  // Only show tokens
-const SHOW_CACHE_READ = true;
-const SHOW_CACHE_WRITE = false;
-const SHOW_LINES = false;
-const SHOW_200K_WARNING = true;
-```
+The `🗂` indicator now shows cache creation broken down by TTL tier:
+- **`⚡1.1m(5m)`** — tokens in the 5-minute ephemeral cache
+- **`0(1h)`** — tokens in the 1-hour ephemeral cache
 
-This would display only: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ`
+### Web Search/Fetch
+
+When Claude uses server-side web tools, counts are shown:
+- **`🔍3`** — 3 web search requests
+- **`📥2`** — 2 web fetch requests
 
 ## Statusline Indicators
 
@@ -291,47 +307,10 @@ The `ᵈ` or `ᶠ` indicator appears after each metric (input/output, cache read
 
 ### Cache Indicators
 
-When prompt caching is active, the statusline shows cache statistics:
-
-- **`⚡151.3k (99.92%)ᵈ`** - Cache read tokens and efficiency percentage
-- **`🗂  +1.5k/150kᵈ`** - Last cache write / Total cache written (daemon mode)
-  - `+1.5k` = tokens written in the last message
-  - `150k` = cumulative total tokens written to cache
-- **`🗂  150kᶠ`** - Total cache written only (fallback mode)
-- **Full example**: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ 🗂  +1.5k/150kᵈ`
+- **`⚡9.0m (99.99%)ᵈ`** - Cache read tokens and efficiency percentage
+- **`🗂 ⚡1.1m(5m) 0(1h)ᵈ`** - Cache creation by tier (5-minute and 1-hour ephemeral)
 
 Cache efficiency is calculated as: `cache_read / (input + cache_read) * 100`
-
-The 🗂 indicator shows `cache_creation_input_tokens`:
-- **Last write** (`+1.5k`) - how much cache was created in the most recent message (daemon mode only)
-- **Total** (`150k`) - cumulative cache creation for the entire session
-
-**Note**: Fallback mode (ᶠ) shows only total cache write (`🗂  150kᶠ`) for better performance. Daemon mode (ᵈ) shows detailed breakdown (`🗂  +1.5k/150kᵈ`).
-
-### Cache TTL Countdown
-
-**⚠️ DISABLED (as of Claude Code v1.0.89+)**: This feature is currently disabled because Claude Code removed statusline auto-refresh. The countdown timer only updates during interaction, making it not useful as a real-time timer.
-
-The implementation remains in the code and can be re-enabled by setting `SHOW_CACHE_TTL = true` if auto-refresh is restored in future versions.
-
-<details>
-<summary>Feature Documentation (for reference)</summary>
-
-When enabled and cache is active in daemon mode, shows time remaining until expiration:
-
-- **`⏱ 4m30sᵈ`** - Green: More than 2 minutes remaining (safe)
-- **`⏱ 1m30sᵈ`** - Yellow: 45 seconds to 2 minutes remaining (warning)
-- **`⏱ 30sᵈ`** - Red: Less than 45 seconds remaining (critical)
-- **Full example**: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ 🗂  +1.5k/150kᵈ ⏱ 3m45sᵈ`
-
-Claude's prompt cache has a 5-minute TTL that refreshes when the cache is **read** (when you send a message and Claude responds using cached context). The daemon tracks the timestamp of the last cache read, and the statusline calculates the remaining time client-side on each refresh. The countdown uses 4.5 minutes (270 seconds) as a safety margin to account for latency.
-
-**Configuration:**
-- `SHOW_CACHE_TTL`: Enable/disable TTL countdown display (default: false)
-- `CACHE_TTL_YELLOW`: Seconds threshold for yellow warning (default: 120)
-- `CACHE_TTL_RED`: Seconds threshold for red critical alert (default: 45)
-
-</details>
 
 ## Font Requirements
 

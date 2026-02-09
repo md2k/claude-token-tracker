@@ -23,6 +23,10 @@ type TokenUsage struct {
 	OutputTokens      int64 `json:"output_tokens"`
 	CacheReadTokens   int64 `json:"cache_read_tokens"`
 	CacheCreateTokens int64 `json:"cache_create_tokens"`
+	CacheTier5mTokens int64 `json:"cache_tier_5m_tokens"`
+	CacheTier1hTokens int64 `json:"cache_tier_1h_tokens"`
+	WebSearchCount    int64 `json:"web_search_count"`
+	WebFetchCount     int64 `json:"web_fetch_count"`
 }
 
 // SessionTracker tracks a single transcript file
@@ -40,9 +44,11 @@ type SessionTracker struct {
 	parseCount            int64
 	totalParseTime        time.Duration
 	cacheInvalidatedAt    time.Time
-	lastCacheReadTokens   int64
-	lastCacheCreateTokens int64
-	lastCacheReadTime     time.Time
+	lastCacheReadTokens    int64
+	lastCacheCreateTokens  int64
+	lastCacheTier5mTokens  int64
+	lastCacheTier1hTokens  int64
+	lastCacheReadTime      time.Time
 }
 
 // Config holds daemon configuration
@@ -287,6 +293,8 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 	usage := tracker.usage
 	cacheInvalidatedAt := tracker.cacheInvalidatedAt
 	lastCacheCreate := tracker.lastCacheCreateTokens
+	lastTier5m := tracker.lastCacheTier5mTokens
+	lastTier1h := tracker.lastCacheTier1hTokens
 	lastCacheReadTime := tracker.lastCacheReadTime
 	tracker.mu.RUnlock()
 
@@ -307,9 +315,15 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 		"output_tokens":             usage.OutputTokens,
 		"cache_read_tokens":         usage.CacheReadTokens,
 		"cache_create_tokens":       usage.CacheCreateTokens,
-		"last_cache_create_tokens":  lastCacheCreate,
-		"cache_rebuilding":          cacheRebuilding,
-		"cache_last_read_timestamp": cacheLastReadTimestamp,
+		"cache_tier_5m_tokens":      usage.CacheTier5mTokens,
+		"cache_tier_1h_tokens":      usage.CacheTier1hTokens,
+		"web_search_count":          usage.WebSearchCount,
+		"web_fetch_count":           usage.WebFetchCount,
+		"last_cache_create_tokens":    lastCacheCreate,
+		"last_cache_tier_5m_tokens":  lastTier5m,
+		"last_cache_tier_1h_tokens":  lastTier1h,
+		"cache_rebuilding":           cacheRebuilding,
+		"cache_last_read_timestamp":  cacheLastReadTimestamp,
 	})
 }
 
@@ -522,6 +536,28 @@ func (t *SessionTracker) parseFile() error {
 			cacheCreate = int64(val)
 		}
 
+		// Extract cache tier breakdown
+		var tier5m, tier1h int64
+		if cacheCreation, ok := usage["cache_creation"].(map[string]interface{}); ok {
+			if val, ok := cacheCreation["ephemeral_5m_input_tokens"].(float64); ok {
+				tier5m = int64(val)
+			}
+			if val, ok := cacheCreation["ephemeral_1h_input_tokens"].(float64); ok {
+				tier1h = int64(val)
+			}
+		}
+
+		// Extract web search/fetch counts
+		var webSearch, webFetch int64
+		if serverToolUse, ok := usage["server_tool_use"].(map[string]interface{}); ok {
+			if val, ok := serverToolUse["web_search_requests"].(float64); ok {
+				webSearch = int64(val)
+			}
+			if val, ok := serverToolUse["web_fetch_requests"].(float64); ok {
+				webFetch = int64(val)
+			}
+		}
+
 		// Update totals first
 		t.mu.Lock()
 		if val, ok := usage["input_tokens"].(float64); ok {
@@ -534,9 +570,15 @@ func (t *SessionTracker) parseFile() error {
 		// Update token counts
 		t.usage.CacheReadTokens += cacheRead
 		t.usage.CacheCreateTokens += cacheCreate
+		t.usage.CacheTier5mTokens += tier5m
+		t.usage.CacheTier1hTokens += tier1h
+		t.usage.WebSearchCount += webSearch
+		t.usage.WebFetchCount += webFetch
 
 		// Track the last individual cache create value (not cumulative)
 		t.lastCacheCreateTokens = cacheCreate
+		t.lastCacheTier5mTokens = tier5m
+		t.lastCacheTier1hTokens = tier1h
 
 		// Detect cache invalidation via large drop in cache_read
 		// This handles checkpoint-based cache expiration where segments expire gradually
