@@ -49,6 +49,9 @@ type SessionTracker struct {
 	lastCacheTier5mTokens  int64
 	lastCacheTier1hTokens  int64
 	lastCacheReadTime      time.Time
+	lastCacheEvent         string
+	prevCacheReadTokens    int64
+	prevCacheCreateTokens  int64
 }
 
 // Config holds daemon configuration
@@ -296,6 +299,7 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 	lastTier5m := tracker.lastCacheTier5mTokens
 	lastTier1h := tracker.lastCacheTier1hTokens
 	lastCacheReadTime := tracker.lastCacheReadTime
+	cacheEvent := tracker.lastCacheEvent
 	tracker.mu.RUnlock()
 
 	// Check if cache is currently rebuilding
@@ -322,6 +326,7 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 		"last_cache_create_tokens":    lastCacheCreate,
 		"last_cache_tier_5m_tokens":  lastTier5m,
 		"last_cache_tier_1h_tokens":  lastTier1h,
+		"cache_event":                cacheEvent,
 		"cache_rebuilding":           cacheRebuilding,
 		"cache_last_read_timestamp":  cacheLastReadTimestamp,
 	})
@@ -397,6 +402,16 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 		"idle_for":            time.Since(lastReq).Round(time.Second).String(),
 		"sessions":            sessions,
 	})
+}
+
+func formatTokens(n int64) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fm", float64(n)/1000000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func formatIdleTimeout(config Config) string {
@@ -580,25 +595,37 @@ func (t *SessionTracker) parseFile() error {
 		t.lastCacheTier5mTokens = tier5m
 		t.lastCacheTier1hTokens = tier1h
 
-		// Detect cache invalidation via large drop in cache_read
-		// This handles checkpoint-based cache expiration where segments expire gradually
-		if t.lastCacheReadTokens > 0 && cacheRead < t.lastCacheReadTokens {
-			drop := t.lastCacheReadTokens - cacheRead
+		// Detect cache events (same logic as analyze_transcript.py)
+		// Priority: INVALIDATION > START > READ > GREW
+		if t.prevCacheReadTokens > 0 && cacheRead < t.prevCacheReadTokens {
+			drop := t.prevCacheReadTokens - cacheRead
 			if drop >= daemon.config.CacheDropThreshold {
 				t.cacheInvalidatedAt = time.Now()
+				t.lastCacheEvent = fmt.Sprintf("🔄 INVALIDATION (↓%s)", formatTokens(drop))
 				logger.Printf("Cache invalidation detected for %s: %d tokens dropped (was %d, now %d)",
-					t.path, drop, t.lastCacheReadTokens, cacheRead)
+					t.path, drop, t.prevCacheReadTokens, cacheRead)
+			}
+		} else if cacheCreate > 0 && t.prevCacheCreateTokens == 0 {
+			t.lastCacheEvent = "🆕 CACHE START"
+		} else if cacheRead > 0 && t.prevCacheReadTokens == 0 {
+			t.lastCacheEvent = "⚡ CACHE READ"
+		} else if cacheRead > t.prevCacheReadTokens && t.prevCacheReadTokens > 0 {
+			increase := cacheRead - t.prevCacheReadTokens
+			if increase >= 1000 {
+				t.lastCacheEvent = fmt.Sprintf("📈 GREW (+%s)", formatTokens(increase))
 			}
 		}
 
+		// Update previous values for next comparison
+		t.prevCacheReadTokens = cacheRead
+		t.prevCacheCreateTokens = cacheCreate
+
 		// Track when cache was last read (for TTL countdown)
-		// Cache TTL is refreshed when cache is READ (when user sends message), not written
-		// Only update timestamp when we see a NEW cache_read value (different from last)
 		if cacheRead > 0 && cacheRead != t.lastCacheReadTokens {
 			t.lastCacheReadTime = time.Now()
 		}
 
-		// Update last cache read value for next comparison
+		// Update last cache read value
 		if cacheRead > 0 {
 			t.lastCacheReadTokens = cacheRead
 		}

@@ -159,6 +159,9 @@ curl http://localhost:7777/shutdown
   #   "web_search_count": 3,
   #   "web_fetch_count": 2,
   #   "last_cache_create_tokens": 1523,
+  #   "last_cache_tier_5m_tokens": 1523,
+  #   "last_cache_tier_1h_tokens": 0,
+  #   "cache_event": "📈 GREW (+1.3k)",
   #   "cache_rebuilding": false,
   #   "cache_last_read_timestamp": 1770640116
   # }
@@ -169,11 +172,14 @@ curl http://localhost:7777/shutdown
   - `output_tokens`: Claude's response tokens
   - `cache_read_tokens`: Tokens retrieved from cache (savings)
   - `cache_create_tokens`: Total cumulative tokens written to cache
-  - `cache_tier_5m_tokens`: Tokens written to the 5-minute ephemeral cache tier
-  - `cache_tier_1h_tokens`: Tokens written to the 1-hour ephemeral cache tier
+  - `cache_tier_5m_tokens`: Cumulative tokens written to the 5-minute ephemeral cache tier
+  - `cache_tier_1h_tokens`: Cumulative tokens written to the 1-hour ephemeral cache tier
   - `web_search_count`: Cumulative web search requests made by server tools
   - `web_fetch_count`: Cumulative web fetch requests made by server tools
   - `last_cache_create_tokens`: Tokens written in the most recent message
+  - `last_cache_tier_5m_tokens`: Last message's tokens written to 5-minute tier
+  - `last_cache_tier_1h_tokens`: Last message's tokens written to 1-hour tier
+  - `cache_event`: Latest cache lifecycle event (`🆕 CACHE START`, `⚡ CACHE READ`, `🔄 INVALIDATION (↓Xk)`, `📈 GREW (+Xk)`, or empty)
   - `cache_rebuilding`: Boolean indicating if cache is currently rebuilding
   - `cache_last_read_timestamp`: Unix timestamp of last cache read (0 if no active cache)
 
@@ -217,35 +223,96 @@ curl http://localhost:7777/shutdown
 
 ## Statusline Layout
 
-The statusline uses a 2-line layout:
+The statusline uses a 2-line layout with all sections always visible (dim placeholders when N/A).
 
 **Line 1 — Identity, Context, Cost & Location**
 ```
-Sonnet 4.5 │ 200k ctx │ 🤖 agent │ $0.4521 │ 45m12s (API: 12m08s) │ 01fe6720-...81f9016365a7 │ ~/g/F/a/claude-chatplace │  main ✚2
+Opus 4.6       │ 200k ctx │ 🤖 agent │ $17.42 │ 98m56s (API: 32m10s) │ 01fe6720-f91b-4cb6-80d5-81f9016365a7 │ ~/g/F/a/chatplace │  main ✚2
 ```
 
-**Line 2 — Progress Bar, Tokens & Metrics**
+**Line 2 — Progress Bar, Tokens, Cache & Metrics**
 ```
-▓▓▓▓▓▓░░░░░░░░░░░░░░ 28% │ 676↓ 21k↑ᵈ │ ⚡9.0m (99.99%)ᵈ 🗂 ⚡1.1m(5m) 0(1h)ᵈ │ 🔍3 📥2 │ +156 -23
+▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░  51% │ 818↓ 27.1k↑ᵈ │ ⚡ 12.6m (99.99%)ᵈ │ 🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ │ 📈 GREW (+1.3k) │ 🔍 0  📥 0 │ +431 -273
 ```
+
+### Line 1 — Section by Section
+
+| Section | Example | Source | Description |
+|---------|---------|--------|-------------|
+| Model | `Opus 4.6` | `model.display_name` | Active model name, padded to 14 chars for alignment |
+| Context | `200k ctx` | `context_window.context_window_size` | Context window size (auto-formats: `200k`, `1m`) |
+| Agent | `🤖 agent` | `agent.name` | Agent name if present, otherwise `🤖 —` |
+| Cost | `$17.42` | `cost.total_cost_usd` | Session cost in USD |
+| Duration | `98m56s (API: 32m10s)` | `cost.total_duration_ms` / `total_api_duration_ms` | Wall clock and API time |
+| Session ID | `01fe6720-...a7` | `session_id` | Full session UUID |
+| Path | `~/g/F/a/chatplace` | `workspace.current_dir` | Working directory (Powerlevel10k-style truncation) |
+| Git | ` main ✚2` | `git` CLI | Branch name + status (`✚` staged, `✘` modified, `?` untracked) |
+
+### Line 2 — Section by Section
+
+| Section | Example | Source | Description |
+|---------|---------|--------|-------------|
+| Progress bar | `▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 51%` | `context_window.used_percentage` | Context window usage with color-coded bands |
+| Tokens | `818↓ 27.1k↑ᵈ` | daemon / fallback | Fresh input ↓ and output ↑ tokens |
+| Cache read | `⚡ 12.6m (99.99%)ᵈ` | daemon / fallback | Cache read tokens and efficiency % |
+| Cache write | `🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ` | daemon / fallback | Last write per tier + total cumulative |
+| Cache event | `📈 GREW (+1.3k)` | daemon / fallback | Latest cache lifecycle event |
+| Web tools | `🔍 0  📥 0` | daemon / fallback | Cumulative web search and fetch counts |
+| Lines | `+431 -273` | `cost.total_lines_added/removed` | Lines added/removed in session |
 
 ### Progress Bar Colors
 
-The progress bar uses color-coded 20% bands based on context window usage:
+Color-coded 20% bands based on context window usage:
 - **0-19%**: Cyan — plenty of room
 - **20-39%**: Green — comfortable
 - **40-59%**: Yellow — moderate usage
 - **60-79%**: Orange — getting full
 - **80-100%**: Red — nearly full
 
-### New Fields
+### Icons Reference
 
-- **Context window size** (`200k ctx`): from `context_window.context_window_size`
-- **API duration** (`API: 12m08s`): from `cost.total_api_duration_ms`
-- **Session ID** (truncated): from `session_id`
-- **Agent name** (`🤖 agent`): from `agent.name` (shown only when present)
-- **Cache tier breakdown** (`🗂 ⚡1.1m(5m) 0(1h)ᵈ`): ephemeral 5-minute and 1-hour cache tiers
-- **Web search/fetch** (`🔍3 📥2`): cumulative web search and fetch request counts
+| Icon | Meaning |
+|------|---------|
+| `↓` | Input tokens (fresh, non-cached) |
+| `↑` | Output tokens |
+| `ᵈ` | Data from daemon (fast, cached) |
+| `ᶠ` | Data from fallback (direct file parse) |
+| `⚡` | Cache read — tokens retrieved from prompt cache |
+| `🗂` | Cache write — tokens written to prompt cache |
+| `🔍` | Web search requests (server tool) |
+| `📥` | Web fetch requests (server tool) |
+| `🤖` | Agent name |
+| `` | Git branch |
+| `✚` | Staged changes |
+| `✘` | Modified (unstaged) changes |
+| `?` | Untracked files |
+| `⚠200k` | Context window exceeds 200k tokens |
+| `⏳` | Daemon starting up |
+
+### Cache Events
+
+The daemon detects cache lifecycle events by comparing `cache_read` and `cache_create` values between consecutive API messages:
+
+| Event | Icon | Color | Trigger |
+|-------|------|-------|---------|
+| Cache start | `🆕 CACHE START` | Yellow | First `cache_create > 0` (new cache created) |
+| Cache read | `⚡ CACHE READ` | Green | First `cache_read > 0` (cache warmed up) |
+| Invalidation | `🔄 INVALIDATION (↓109k)` | Red | `cache_read` drops ≥ 10k tokens (cache expired) |
+| Growth | `📈 GREW (+12.5k)` | Cyan | `cache_read` increases ≥ 1k tokens (context growing) |
+
+These events use the same detection logic as `analyze_transcript.py`. The statusline shows the most recent event; use the analyzer for full history.
+
+### Cache Write Format
+
+```
+🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ
+```
+
+- **`+1.7k (5m)`** — last message wrote 1.7k tokens to the 5-minute ephemeral cache
+- **`0 (1h)`** — last message wrote 0 tokens to the 1-hour ephemeral cache
+- **`/ 1.7m`** — total cumulative tokens written to cache this session
+
+Cache efficiency: `cache_read / (input + cache_read) * 100`
 
 ## Customization
 
@@ -280,37 +347,6 @@ The statusline intelligently truncates long directory paths (inspired by Powerle
 **Configuration:**
 - `PATH_MAX_LENGTH`: Maximum characters (default: 40)
 - `PATH_SHORTEN_STRATEGY`: Enable/disable truncation (default: true)
-
-### Cache Tier Breakdown
-
-The `🗂` indicator now shows cache creation broken down by TTL tier:
-- **`⚡1.1m(5m)`** — tokens in the 5-minute ephemeral cache
-- **`0(1h)`** — tokens in the 1-hour ephemeral cache
-
-### Web Search/Fetch
-
-When Claude uses server-side web tools, counts are shown:
-- **`🔍3`** — 3 web search requests
-- **`📥2`** — 2 web fetch requests
-
-## Statusline Indicators
-
-The statusline displays different indicators based on the data source:
-
-- **`27.8k↓ 71.9k↑ᵈ`** - Using daemon (fast, cached) - indicated by superscript `ᵈ`
-- **`27.8k↓ 71.9k↑ᶠ`** - Using fallback (direct file parsing) - indicated by superscript `ᶠ`
-- **`27.8k↓ 71.9k↑ᵈ 🔄`** - Cache rebuilding after invalidation (shown for 60s by default)
-- **`⏳ starting...`** - Daemon is starting up
-- **`[tokens N/A]`** - Token data unavailable
-
-The `ᵈ` or `ᶠ` indicator appears after each metric (input/output, cache read, cache write) to clearly show the data source.
-
-### Cache Indicators
-
-- **`⚡9.0m (99.99%)ᵈ`** - Cache read tokens and efficiency percentage
-- **`🗂 ⚡1.1m(5m) 0(1h)ᵈ`** - Cache creation by tier (5-minute and 1-hour ephemeral)
-
-Cache efficiency is calculated as: `cache_read / (input + cache_read) * 100`
 
 ## Font Requirements
 
