@@ -14,3 +14,6 @@ go.work
 
 # Logs
 *.log
+
+# Python
+__pycache__/
