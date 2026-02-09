@@ -52,6 +52,7 @@ type Config struct {
 	IdleTimeout               time.Duration
 	CacheRebuildAlertDuration time.Duration
 	CacheDropThreshold        int64
+	MaxScanBufferSize         int
 	LogLevel                  string
 	PIDFile                   string
 	NeverTimeout              bool
@@ -128,6 +129,7 @@ func parseFlags() Config {
 	idleTimeoutStr := flag.String("idle-timeout", "10m", "Daemon idle shutdown timeout (e.g., 10m, 1h, or 'never')")
 	cacheRebuildAlertStr := flag.String("cache-rebuild-alert", "60s", "Cache rebuild alert duration (e.g., 30s, 60s, 90s)")
 	cacheDropThreshold := flag.Int64("cache-drop-threshold", 10000, "Cache drop threshold in tokens to detect invalidation (default: 10000)")
+	maxScanBuffer := flag.Int("max-scan-buffer", 100, "Max scanner buffer size in MB for parsing large JSONL lines (default: 100)")
 	logLevel := flag.String("log-level", "info", "Log level (info, silent)")
 	pidFile := flag.String("pid-file", "", "PID file path (default: ~/.claude/token-tracker.pid)")
 
@@ -183,6 +185,7 @@ func parseFlags() Config {
 		IdleTimeout:               idleTimeout,
 		CacheRebuildAlertDuration: cacheRebuildAlert,
 		CacheDropThreshold:        *cacheDropThreshold,
+		MaxScanBufferSize:         *maxScanBuffer * 1024 * 1024,
 		LogLevel:                  *logLevel,
 		PIDFile:                   pidPath,
 		NeverTimeout:              neverTimeout,
@@ -486,6 +489,7 @@ func (t *SessionTracker) parseFile() error {
 
 	// Parse new lines
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), daemon.config.MaxScanBufferSize) // start at 64KB, grow up to --max-scan-buffer
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.Contains(line, `"usage"`) {

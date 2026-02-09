@@ -128,6 +128,10 @@ curl http://localhost:7777/shutdown
                               Examples: 30s, 60s, 90s
 --cache-drop-threshold <tokens> Token count drop to detect cache invalidation (default: 10000)
                               Detects checkpoint-based cache expiration
+--max-scan-buffer <MB>        Max scanner buffer size in MB for parsing large JSONL lines
+                              (default: 100). Handles transcript lines containing browser
+                              snapshots, base64 screenshots, or large tool results.
+                              Starts at 64KB and grows on demand up to this limit.
 --log-level <level>            Log level: info, silent (default: info)
 --pid-file <path>              PID file path (default: ~/.claude/token-tracker.pid)
 ```
@@ -374,6 +378,17 @@ lsof -i :7777
 
 # Remove stale PID file
 rm ~/.claude/token-tracker.pid
+```
+
+### Daemon returns stale/frozen data
+
+If token counts stop updating mid-session, it may be caused by a large JSONL line exceeding the scanner buffer (e.g., browser snapshots, base64 screenshots). Check the daemon logs or test directly:
+
+```bash
+# Check for scanner errors
+curl "http://localhost:7777/tokens?path=/path/to/transcript.jsonl"
+# If you see "bufio.Scanner: token too long", increase the buffer:
+~/.claude/token-tracker --max-scan-buffer 200  # 200MB max
 ```
 
 ### Statusline not showing tokens
