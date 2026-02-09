@@ -13,12 +13,19 @@ const {
   output_style: { name: style = 'default' } = {},
   workspace: { current_dir: cwd = '~', project_dir: project = '' } = {},
   transcript_path: transcriptPath = '',
+  context_window: {
+    used_percentage: usedPct = 0,
+    context_window_size: ctxSize = 200000
+  } = {},
   cost: {
     total_cost_usd: cost = 0,
     total_duration_ms: durationMs = 0,
+    total_api_duration_ms: apiDurationMs = 0,
     total_lines_added: linesAdded = 0,
     total_lines_removed: linesRemoved = 0
   } = {},
+  session_id: sessionId = '',
+  agent: { name: agentName = '' } = {},
   exceeds_200k_tokens: exceeds200k = false
 } = input;
 
@@ -32,29 +39,12 @@ const STARTUP_WAIT = 250;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 100;
 
-// Display Configuration - Set to false to hide sections
-const SHOW_MODEL = true;              // Model name (e.g., "Sonnet 4.5")
-const SHOW_PATH = true;               // Current directory path
-const SHOW_GIT = true;                // Git branch and status
-const SHOW_STYLE = true;              // Output style name
-const SHOW_COST = true;               // Cost in USD
-const SHOW_DURATION = true;           // Session duration
-const SHOW_TOKENS_INPUT_OUTPUT = true; // Input/Output tokens
-const SHOW_CACHE_READ = true;         // Cache read tokens and efficiency
-const SHOW_CACHE_WRITE = true;        // Cache write tokens
-const SHOW_CACHE_TTL = false;         // Cache TTL countdown timer (daemon only)
-                                      // DISABLED: Claude Code v1.0.89+ removed statusline auto-refresh,
-                                      // so countdown timer only updates on interaction (not useful)
-const SHOW_LINES = true;              // Lines added/removed
-const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
-
 // Path Truncation Configuration
-const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
-const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
+const PATH_MAX_LENGTH = 40;
+const PATH_SHORTEN_STRATEGY = true;
 
-// Cache TTL Configuration
-const CACHE_TTL_YELLOW = 120;         // Turn yellow at 2 minutes
-const CACHE_TTL_RED = 45;             // Turn red at 45 seconds
+// Progress Bar Configuration
+const BAR_WIDTH = 20;
 
 // Helper function to check daemon health
 function checkDaemonHealth() {
@@ -104,55 +94,22 @@ function fetchTokensFromDaemon(path) {
   }
 }
 
-// Helper function to parse tokens directly from file (fallback)
-function parseTokensDirectly(path) {
-  try {
-    const transcript = readFileSync(path, 'utf-8');
-    const lines = transcript.split('\n');
-    let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreate = 0;
-
-    for (const line of lines) {
-      if (!line.includes('"usage"')) continue;
-      try {
-        const data = JSON.parse(line);
-        const usage = data.message?.usage || data.usage;
-        if (usage) {
-          totalInput += usage.input_tokens || 0;
-          totalOutput += usage.output_tokens || 0;
-          totalCacheRead += usage.cache_read_input_tokens || 0;
-          totalCacheCreate += usage.cache_creation_input_tokens || 0;
-        }
-      } catch {}
-    }
-
-    return {
-      input_tokens: totalInput,
-      output_tokens: totalOutput,
-      cache_read_tokens: totalCacheRead,
-      cache_create_tokens: totalCacheCreate
-      // Note: last_cache_create_tokens not tracked in fallback mode for performance
-    };
-  } catch {
-    return null;
-  }
-}
-
 // Get token usage with daemon integration
 let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreate = 0, lastCacheCreate = 0;
-let tokenStatus = 'ok'; // 'ok', 'starting', 'fallback', 'unavailable'
+let cacheTier5m = 0, cacheTier1h = 0, lastTier5m = 0, lastTier1h = 0;
+let webSearchCount = 0, webFetchCount = 0;
+let invalidationCount = 0, totalTokensInvalidated = 0;
+let tokenStatus = 'ok'; // 'ok', 'starting', 'unavailable'
 let cacheRebuilding = false;
-let cacheLastReadTimestamp = 0;
+let cacheEvent = '';
 
 if (transcriptPath) {
-  // Try to get tokens from daemon
   let tokens = null;
   let daemonHealthy = checkDaemonHealth();
 
   if (!daemonHealthy) {
-    // Daemon not running, try to start it
     if (startDaemon()) {
       tokenStatus = 'starting';
-      // Wait for daemon to start
       const startTime = Date.now();
       while (Date.now() - startTime < STARTUP_WAIT) {
         if (checkDaemonHealth()) {
@@ -164,7 +121,6 @@ if (transcriptPath) {
     }
   }
 
-  // Retry fetching tokens
   if (daemonHealthy) {
     for (let i = 0; i < MAX_RETRIES && !tokens; i++) {
       tokens = fetchTokensFromDaemon(transcriptPath);
@@ -174,10 +130,8 @@ if (transcriptPath) {
     }
   }
 
-  // Fallback to direct parsing if daemon fails
   if (!tokens && tokenStatus !== 'starting') {
-    tokenStatus = 'fallback';
-    tokens = parseTokensDirectly(transcriptPath);
+    tokenStatus = 'unavailable';
   }
 
   if (tokens) {
@@ -186,8 +140,16 @@ if (transcriptPath) {
     totalCacheRead = tokens.cache_read_tokens || 0;
     totalCacheCreate = tokens.cache_create_tokens || 0;
     lastCacheCreate = tokens.last_cache_create_tokens || 0;
+    cacheTier5m = tokens.cache_tier_5m_tokens || 0;
+    cacheTier1h = tokens.cache_tier_1h_tokens || 0;
+    lastTier5m = tokens.last_cache_tier_5m_tokens || 0;
+    lastTier1h = tokens.last_cache_tier_1h_tokens || 0;
+    webSearchCount = tokens.web_search_count || 0;
+    webFetchCount = tokens.web_fetch_count || 0;
     cacheRebuilding = tokens.cache_rebuilding || false;
-    cacheLastReadTimestamp = tokens.cache_last_read_timestamp || 0;
+    cacheEvent = tokens.cache_event || '';
+    invalidationCount = tokens.invalidation_count || 0;
+    totalTokensInvalidated = tokens.total_tokens_invalidated || 0;
   } else if (tokenStatus === 'starting') {
     // Keep starting status
   } else {
@@ -195,25 +157,23 @@ if (transcriptPath) {
   }
 }
 
-// Format helpers
-const fmt = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}m` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : n;
+// ── Format helpers ──────────────────────────────────────────────────────────
+const fmt = (n) => n >= 1e6 ? `${(n/1e6).toFixed(1)}m` : n >= 1e3 ? `${(n/1e3).toFixed(1)}k` : String(n);
 const esc = (code) => `\x1b[${code}m`;
+const dim = esc('2');
+const reset = esc('0');
+const sep = ` ${dim}│${reset} `;
 
 // Intelligent path truncation (Powerlevel10k style)
 function truncatePath(path, maxLength) {
-  if (!PATH_SHORTEN_STRATEGY || path.length <= maxLength) {
-    return path;
-  }
+  if (!PATH_SHORTEN_STRATEGY || path.length <= maxLength) return path;
 
-  const segments = path.split('/').filter(s => s !== ''); // Remove empty segments
-  if (segments.length <= 2) return path; // Don't truncate simple paths like ~/foo
+  const segments = path.split('/').filter(s => s !== '');
+  if (segments.length <= 2) return path;
 
-  // Find the important segment (project name) - usually the longest segment in the middle
-  // Exclude first segment (~) and last segment (current dir)
-  let importantIndex = 1; // Default to second segment
+  let importantIndex = 1;
   let maxLen = 0;
 
-  // Find longest segment between index 1 and length-2 (likely the project name)
   for (let i = 1; i < Math.min(segments.length - 1, 4); i++) {
     if (segments[i].length > maxLen) {
       maxLen = segments[i].length;
@@ -221,17 +181,15 @@ function truncatePath(path, maxLength) {
     }
   }
 
-  // Truncate segments
   const truncated = segments.map((seg, i) => {
-    if (i === 0) return seg; // Keep first segment (~ or /)
-    if (i === importantIndex) return seg; // Keep important segment (project name) full
-    if (i === segments.length - 1) return seg; // Keep last segment (current dir) full
-    return seg[0] || seg; // Truncate middle segments to first letter
+    if (i === 0) return seg;
+    if (i === importantIndex) return seg;
+    if (i === segments.length - 1) return seg;
+    return seg[0] || seg;
   });
 
   let result = truncated.join('/');
 
-  // If still too long, truncate the important segment
   if (result.length > maxLength && importantIndex < segments.length) {
     const important = segments[importantIndex];
     if (important.length > 10) {
@@ -248,8 +206,6 @@ function truncatePath(path, maxLength) {
 let relPath = cwd.replace(project, '');
 if (relPath === cwd) relPath = cwd.replace(process.env.HOME, '~');
 if (relPath === cwd) relPath = '.';
-
-// Apply path truncation
 relPath = truncatePath(relPath, PATH_MAX_LENGTH);
 
 // Get git info
@@ -268,123 +224,166 @@ try {
   if (gitStatus) gitStatus = ' ' + gitStatus;
 } catch {}
 
-// Format duration
-const durationSec = Math.floor(durationMs / 1000);
-const durationStr = `${Math.floor(durationSec/60)}m${(durationSec%60).toString().padStart(2,'0')}s`;
-
-// Cache efficiency with 2 decimal precision
-const cacheEff = totalCacheRead > 0
-  ? ((totalCacheRead / (totalInput + totalCacheRead)) * 100).toFixed(2)
-  : '0.00';
-
-// Build status line
-let output = '';
-const sections = [];
-
-// Model name
-if (SHOW_MODEL) {
-  sections.push(`${esc('2')}${model}${esc('0')}`);
+// Format durations
+function formatDuration(ms) {
+  const sec = Math.floor(ms / 1000);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}m${s.toString().padStart(2, '0')}s`;
 }
 
-// Path
-if (SHOW_PATH) {
-  sections.push(`${esc('38;5;39')}${relPath}${esc('0')}`);
+const durationStr = formatDuration(durationMs);
+const apiDurationStr = formatDuration(apiDurationMs);
+
+// Format context window size (compact: 200k, 1m — no decimals for round numbers)
+const ctxLabel = ctxSize >= 1e6
+  ? (ctxSize % 1e6 === 0 ? `${ctxSize/1e6}m` : `${(ctxSize/1e6).toFixed(1)}m`)
+  : `${Math.round(ctxSize/1e3)}k`;
+
+// Cache net efficiency (accounts for cache write overhead)
+const cacheNetEff = totalCacheRead > 0
+  ? (((totalCacheRead - totalCacheCreate) / (totalInput + totalCacheRead)) * 100).toFixed(1)
+  : '0.0';
+
+// ── Progress bar ────────────────────────────────────────────────────────────
+function progressBar(pct) {
+  const filled = Math.round((pct / 100) * BAR_WIDTH);
+  const empty = BAR_WIDTH - filled;
+
+  // Color based on 20% bands
+  let colorCode;
+  if (pct < 20)       colorCode = '38;5;51';   // cyan
+  else if (pct < 40)  colorCode = '38;5;82';   // green
+  else if (pct < 60)  colorCode = '38;5;226';  // yellow
+  else if (pct < 80)  colorCode = '38;5;208';  // orange
+  else                colorCode = '38;5;196';  // red
+
+  const bar = esc(colorCode)
+    + '▓'.repeat(filled) + '░'.repeat(empty)
+    + ` ${String(Math.round(pct)).padStart(3)}%`
+    + reset;
+  return bar;
 }
 
-// Git branch and status
-if (SHOW_GIT && gitBranch) {
-  sections.push(`${esc('38;5;214')}${gitBranch}${esc('0')}${esc('38;5;196')}${gitStatus}${esc('0')}`);
-}
+// ── Dim placeholder helper ──────────────────────────────────────────────────
+const na = (label) => `${dim}${label}${reset}`;
 
-// Output style
-if (SHOW_STYLE) {
-  sections.push(`${esc('38;5;76')}${style}${esc('0')}`);
-}
+// ── Build Line 1 ───────────────────────────────────────────────────────────
+// model │ ctx size │ agent │ cost │ duration (API: api_dur) │ session_id │ path │ git
+const line1Parts = [];
+
+// Model name — padded to 14 chars so model(14) + sep(3) + ctx(8) = 25 = progress bar width
+line1Parts.push(`${dim}${model.padEnd(14)}${reset}`);
+
+// Context window size
+line1Parts.push(`${esc('38;5;245')}${ctxLabel} ctx${reset}`);
+
+// Agent name — always present
+line1Parts.push(agentName
+  ? `${esc('38;5;141')}🤖 ${agentName}${reset}`
+  : na('🤖 —'));
 
 // Cost
-if (SHOW_COST) {
-  sections.push(`${esc('38;5;226')}$${cost.toFixed(4)}${esc('0')}`);
-}
+line1Parts.push(`${esc('38;5;226')}$${cost.toFixed(4)}${reset}`);
 
-// Duration
-if (SHOW_DURATION) {
-  sections.push(`${esc('38;5;141')}${durationStr}${esc('0')}`);
-}
+// Duration with API duration — always show both slots
+line1Parts.push(apiDurationMs > 0
+  ? `${esc('38;5;141')}${durationStr} ${dim}(API: ${apiDurationStr})${reset}`
+  : `${esc('38;5;141')}${durationStr} ${dim}(API: —)${reset}`);
 
-// Join sections with separator
-output = sections.join(` ${esc('2')}│${esc('0')} `);
+// Session ID — always present, full length
+line1Parts.push(sessionId
+  ? `${dim}${sessionId}${reset}`
+  : na('no session'));
 
-// Add tokens
+// Path — show "." when empty
+line1Parts.push(`${esc('38;5;39')}${relPath || '.'}${reset}`);
+
+// Git branch — always present
+line1Parts.push(gitBranch
+  ? `${esc('38;5;214')} ${gitBranch}${reset}${esc('38;5;196')}${gitStatus}${reset}`
+  : na(' —'));
+
+const line1 = line1Parts.join(sep);
+
+// ── Build Line 2 ───────────────────────────────────────────────────────────
+// progress bar │ input↓ output↑ │ cache efficiency │ cache tiers │ web │ lines
+const line2Parts = [];
+
+// Progress bar — always present
+line2Parts.push(progressBar(usedPct));
+
+// Token indicator — only show source marker when we actually fetched data
+const indicator = !transcriptPath ? '' : tokenStatus === 'ok' ? 'ᵈ' : '';
+
+// Input/Output tokens — always present
 if (tokenStatus === 'starting') {
-  output += ` ${esc('2')}│${esc('0')} ${esc('38;5;226')}⏳ starting...${esc('0')}`;
+  line2Parts.push(`${esc('38;5;226')}⏳ starting...${reset}`);
+  line2Parts.push(na('⚡ —'));
+  line2Parts.push(na('🗂  —'));
+  line2Parts.push(na('—'));
 } else if (tokenStatus === 'unavailable') {
-  output += ` ${esc('2')}│${esc('0')} ${esc('38;5;196')}[tokens N/A]${esc('0')}`;
-} else if (totalInput > 0 || totalOutput > 0) {
-  const indicator = tokenStatus === 'fallback' ? 'ᶠ' : 'ᵈ';
-  const rebuildIcon = cacheRebuilding ? ' 🔄' : '';
+  line2Parts.push(`${esc('38;5;196')}[tokens N/A]${reset}`);
+  line2Parts.push(na('⚡ —'));
+  line2Parts.push(na('🗂  —'));
+  line2Parts.push(na('—'));
+} else {
+  // Input/Output — always show (0 if no data)
+  line2Parts.push(
+    `${esc('38;5;33')}${fmt(totalInput)}↓${reset} ${esc('38;5;213')}${fmt(totalOutput)}↑${indicator}${reset}`
+  );
 
-  // Input/Output tokens
-  if (SHOW_TOKENS_INPUT_OUTPUT) {
-    output += ` ${esc('2')}│${esc('0')} ${esc('38;5;33')}${fmt(totalInput)}↓${esc('0')} ${esc('38;5;213')}${fmt(totalOutput)}↑${indicator}${rebuildIcon}${esc('0')}`;
+  // Cache net efficiency — always present
+  line2Parts.push(totalCacheRead > 0
+    ? `${esc('38;5;99')}⚡ ${fmt(totalCacheRead)} (${cacheNetEff}%)${indicator}${reset}`
+    : na(`⚡ — (—%)${indicator}`));
+
+  // Cache write: last per-tier + total — always present
+  if (totalCacheCreate > 0) {
+    const last5m = lastTier5m > 0 ? `+${fmt(lastTier5m)}` : '0';
+    const last1h = lastTier1h > 0 ? `+${fmt(lastTier1h)}` : '0';
+    line2Parts.push(
+      `${esc('38;5;147')}🗂  ${last5m} ${dim}(5m)${reset}  ${esc('38;5;147')}${last1h} ${dim}(1h)${reset} ${dim}/${reset} ${esc('38;5;147')}${fmt(totalCacheCreate)}${indicator}${reset}`
+    );
+  } else {
+    line2Parts.push(na(`🗂  0 (5m)  0 (1h) / 0${indicator}`));
   }
 
-  // Cache tokens
-  if ((SHOW_CACHE_READ && totalCacheRead > 0) || (SHOW_CACHE_WRITE && totalCacheCreate > 0)) {
-    output += ` ${esc('2')}│${esc('0')}`;
-
-    // Cache read
-    if (SHOW_CACHE_READ && totalCacheRead > 0) {
-      output += ` ${esc('38;5;99')}⚡${fmt(totalCacheRead)} ${esc('2')}(${cacheEff}%)${indicator}${esc('0')}`;
-    }
-
-    // Cache write
-    if (SHOW_CACHE_WRITE && totalCacheCreate > 0) {
-      // Show last write and total: 🗂  +1.5k/151k or just total if last is 0
-      if (lastCacheCreate > 0) {
-        output += ` ${esc('38;5;147')}🗂  +${fmt(lastCacheCreate)}${esc('2')}/${esc('0')}${esc('38;5;147')}${fmt(totalCacheCreate)}${indicator}${esc('0')}`;
-      } else {
-        output += ` ${esc('38;5;147')}🗂  ${fmt(totalCacheCreate)}${indicator}${esc('0')}`;
-      }
-    }
-
-    // Cache TTL countdown (daemon only)
-    if (SHOW_CACHE_TTL && tokenStatus === 'ok' && cacheLastReadTimestamp > 0) {
-      // Calculate remaining time client-side (real-time countdown)
-      // 270 seconds = 4.5 minutes (5 min TTL with safety margin)
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      const elapsed = nowSeconds - cacheLastReadTimestamp;
-      const remaining = 270 - elapsed;
-
-      if (remaining > 0) {
-        const minutes = Math.floor(remaining / 60);
-        const seconds = remaining % 60;
-        const timeStr = minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`;
-
-        // Color gradient based on time remaining
-        let ttlColor;
-        if (remaining > CACHE_TTL_YELLOW) {
-          ttlColor = '82';  // Green
-        } else if (remaining > CACHE_TTL_RED) {
-          ttlColor = '226'; // Yellow
-        } else {
-          ttlColor = '196'; // Red
-        }
-
-        output += ` ${esc(`38;5;${ttlColor}`)}⏱ ${timeStr}${indicator}${esc('0')}`;
-      }
-    }
+  // Cache event — always present
+  if (cacheEvent) {
+    // Color based on event type
+    let evtColor = '38;5;245'; // default dim
+    if (cacheEvent.startsWith('🔄')) evtColor = '38;5;196';      // red for invalidation
+    else if (cacheEvent.startsWith('🆕')) evtColor = '38;5;226';  // yellow for start
+    else if (cacheEvent.startsWith('⚡')) evtColor = '38;5;82';   // green for read
+    else if (cacheEvent.startsWith('📈')) evtColor = '38;5;51';   // cyan for growth
+    line2Parts.push(`${esc(evtColor)}${cacheEvent}${reset}`);
+  } else {
+    line2Parts.push(na('no event'));
   }
 }
 
-// Add lines
-if (SHOW_LINES && linesAdded > 0) {
-  output += ` ${esc('2')}│${esc('0')} ${esc('38;5;82')}+${linesAdded}${esc('0')}`;
-  if (linesRemoved > 0) output += ` ${esc('38;5;196')}-${linesRemoved}${esc('0')}`;
+// Web search/fetch — always present
+if (webSearchCount > 0 || webFetchCount > 0) {
+  line2Parts.push(`${esc('38;5;117')}🔍 ${webSearchCount}  📥 ${webFetchCount}${reset}`);
+} else {
+  line2Parts.push(na('🔍 0  📥 0'));
 }
 
-// Add warning
-if (SHOW_200K_WARNING && exceeds200k) {
-  output += ` ${esc('38;5;196')}⚠200k${esc('0')}`;
+// Lines added/removed — always present
+if (linesAdded > 0 || linesRemoved > 0) {
+  line2Parts.push(`${esc('38;5;82')}+${linesAdded}${reset} ${esc('38;5;196')}-${linesRemoved}${reset}`);
+} else {
+  line2Parts.push(na('+0 -0'));
 }
 
-console.log(output);
+// 200k warning — only shown when active (this is a warning, not a slot)
+if (exceeds200k) {
+  line2Parts.push(`${esc('38;5;196')}⚠200k${reset}`);
+}
+
+const line2 = line2Parts.join(sep);
+
+// ── Output ──────────────────────────────────────────────────────────────────
+console.log(line1);
+console.log(line2);

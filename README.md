@@ -128,6 +128,10 @@ curl http://localhost:7777/shutdown
                               Examples: 30s, 60s, 90s
 --cache-drop-threshold <tokens> Token count drop to detect cache invalidation (default: 10000)
                               Detects checkpoint-based cache expiration
+--max-scan-buffer <MB>        Max scanner buffer size in MB for parsing large JSONL lines
+                              (default: 100). Handles transcript lines containing browser
+                              snapshots, base64 screenshots, or large tool results.
+                              Starts at 64KB and grows on demand up to this limit.
 --log-level <level>            Log level: info, silent (default: info)
 --pid-file <path>              PID file path (default: ~/.claude/token-tracker.pid)
 ```
@@ -150,8 +154,18 @@ curl http://localhost:7777/shutdown
   #   "output_tokens": 70997,
   #   "cache_read_tokens": 17891893,
   #   "cache_create_tokens": 1582021,
+  #   "cache_tier_5m_tokens": 1580000,
+  #   "cache_tier_1h_tokens": 2021,
+  #   "web_search_count": 3,
+  #   "web_fetch_count": 2,
   #   "last_cache_create_tokens": 1523,
-  #   "cache_rebuilding": false
+  #   "last_cache_tier_5m_tokens": 1523,
+  #   "last_cache_tier_1h_tokens": 0,
+  #   "cache_event": "📈 GREW (+1.3k)",
+  #   "cache_rebuilding": false,
+  #   "cache_last_read_timestamp": 1770640116,
+  #   "invalidation_count": 4,
+  #   "total_tokens_invalidated": 284900
   # }
   ```
 
@@ -160,9 +174,18 @@ curl http://localhost:7777/shutdown
   - `output_tokens`: Claude's response tokens
   - `cache_read_tokens`: Tokens retrieved from cache (savings)
   - `cache_create_tokens`: Total cumulative tokens written to cache
+  - `cache_tier_5m_tokens`: Cumulative tokens written to the 5-minute ephemeral cache tier
+  - `cache_tier_1h_tokens`: Cumulative tokens written to the 1-hour ephemeral cache tier
+  - `web_search_count`: Cumulative web search requests made by server tools
+  - `web_fetch_count`: Cumulative web fetch requests made by server tools
   - `last_cache_create_tokens`: Tokens written in the most recent message
+  - `last_cache_tier_5m_tokens`: Last message's tokens written to 5-minute tier
+  - `last_cache_tier_1h_tokens`: Last message's tokens written to 1-hour tier
+  - `cache_event`: Latest cache lifecycle event (`🆕 CACHE START`, `⚡ CACHE READ`, `🔄 INVALIDATION (↓Xk)`, `📈 GREW (+Xk)`, or empty)
   - `cache_rebuilding`: Boolean indicating if cache is currently rebuilding
   - `cache_last_read_timestamp`: Unix timestamp of last cache read (0 if no active cache)
+  - `invalidation_count`: Number of cache invalidations detected (drops ≥ 10k tokens)
+  - `total_tokens_invalidated`: Sum of all cache_read drops across invalidations
 
 - **`GET /status`** - Daemon status and active sessions
   ```bash
@@ -202,37 +225,113 @@ curl http://localhost:7777/shutdown
   # {"status":"shutting down"}
   ```
 
+## Statusline Layout
+
+The statusline uses a 2-line layout with all sections always visible (dim placeholders when N/A).
+
+**Line 1 — Identity, Context, Cost & Location**
+```
+Opus 4.6       │ 200k ctx │ 🤖 agent │ $17.42 │ 98m56s (API: 32m10s) │ 01fe6720-f91b-4cb6-80d5-81f9016365a7 │ ~/g/F/a/chatplace │  main ✚2
+```
+
+**Line 2 — Progress Bar, Tokens, Cache & Metrics**
+```
+▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░  51% │ 818↓ 27.1k↑ᵈ │ ⚡ 12.6m (97.1%)ᵈ │ 🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ │ 📈 GREW (+1.3k) │ 🔍 0  📥 0 │ +431 -273
+```
+
+### Line 1 — Section by Section
+
+| Section | Example | Source | Description |
+|---------|---------|--------|-------------|
+| Model | `Opus 4.6` | `model.display_name` | Active model name, padded to 14 chars for alignment |
+| Context | `200k ctx` | `context_window.context_window_size` | Context window size (auto-formats: `200k`, `1m`) |
+| Agent | `🤖 agent` | `agent.name` | Agent name if present, otherwise `🤖 —` |
+| Cost | `$17.42` | `cost.total_cost_usd` | Session cost in USD |
+| Duration | `98m56s (API: 32m10s)` | `cost.total_duration_ms` / `total_api_duration_ms` | Wall clock and API time |
+| Session ID | `01fe6720-...a7` | `session_id` | Full session UUID |
+| Path | `~/g/F/a/chatplace` | `workspace.current_dir` | Working directory (Powerlevel10k-style truncation) |
+| Git | ` main ✚2` | `git` CLI | Branch name + status (`✚` staged, `✘` modified, `?` untracked) |
+
+### Line 2 — Section by Section
+
+| Section | Example | Source | Description |
+|---------|---------|--------|-------------|
+| Progress bar | `▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 51%` | `context_window.used_percentage` | Context window usage with color-coded bands |
+| Tokens | `818↓ 27.1k↑ᵈ` | daemon / fallback | Fresh input ↓ and output ↑ tokens |
+| Cache read | `⚡ 12.6m (97.1%)ᵈ` | daemon / fallback | Cache read tokens and net efficiency % (accounts for write overhead) |
+| Cache write | `🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ` | daemon / fallback | Last write per tier + total cumulative |
+| Cache event | `📈 GREW (+1.3k)` | daemon / fallback | Latest cache lifecycle event |
+| Web tools | `🔍 0  📥 0` | daemon / fallback | Cumulative web search and fetch counts |
+| Lines | `+431 -273` | `cost.total_lines_added/removed` | Lines added/removed in session |
+
+### Progress Bar Colors
+
+Color-coded 20% bands based on context window usage:
+- **0-19%**: Cyan — plenty of room
+- **20-39%**: Green — comfortable
+- **40-59%**: Yellow — moderate usage
+- **60-79%**: Orange — getting full
+- **80-100%**: Red — nearly full
+
+### Icons Reference
+
+| Icon | Meaning |
+|------|---------|
+| `↓` | Input tokens (fresh, non-cached) |
+| `↑` | Output tokens |
+| `ᵈ` | Data from daemon (fast, cached) |
+| `ᶠ` | Data from fallback (direct file parse) |
+| `⚡` | Cache read — tokens retrieved from prompt cache |
+| `🗂` | Cache write — tokens written to prompt cache |
+| `🔍` | Web search requests (server tool) |
+| `📥` | Web fetch requests (server tool) |
+| `🤖` | Agent name |
+| `` | Git branch |
+| `✚` | Staged changes |
+| `✘` | Modified (unstaged) changes |
+| `?` | Untracked files |
+| `⚠200k` | Context window exceeds 200k tokens |
+| `⏳` | Daemon starting up |
+
+### Cache Events
+
+The daemon detects cache lifecycle events by comparing `cache_read` and `cache_create` values between consecutive API messages:
+
+| Event | Icon | Color | Trigger |
+|-------|------|-------|---------|
+| Cache start | `🆕 CACHE START` | Yellow | First `cache_create > 0` (new cache created) |
+| Cache read | `⚡ CACHE READ` | Green | First `cache_read > 0` (cache warmed up) |
+| Invalidation | `🔄 INVALIDATION (↓109k)` | Red | `cache_read` drops ≥ 10k tokens (cache expired) |
+| Growth | `📈 GREW (+12.5k)` | Cyan | `cache_read` increases ≥ 1k tokens (context growing) |
+
+These events use the same detection logic as `analyze_transcript.py`. The statusline shows the most recent event; use the analyzer for full history.
+
+### Cache Write Format
+
+```
+🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ
+```
+
+- **`+1.7k (5m)`** — last message wrote 1.7k tokens to the 5-minute ephemeral cache
+- **`0 (1h)`** — last message wrote 0 tokens to the 1-hour ephemeral cache
+- **`/ 1.7m`** — total cumulative tokens written to cache this session
+
+Cache net efficiency: `(cache_read - cache_create) / (input + cache_read) * 100`
+
+Unlike hit rate (`cache_read / total_input`), net efficiency subtracts the cost of cache writes from the benefit of cache reads. This prevents misleading 99.99% efficiency numbers when sessions have significant cache invalidations and rewrites.
+
 ## Customization
 
-You can customize which sections appear in your statusline by editing `~/.claude/statusline.mjs`. At the top of the file, you'll find the Display Configuration section:
+You can customize the statusline by editing `~/.claude/statusline.mjs`. Configuration options at the top of the file:
 
 ```javascript
-// Display Configuration - Set to false to hide sections
-const SHOW_MODEL = true;              // Model name (e.g., "Sonnet 4.5")
-const SHOW_PATH = true;               // Current directory path
-const SHOW_GIT = true;                // Git branch and status
-const SHOW_STYLE = true;              // Output style name
-const SHOW_COST = true;               // Cost in USD
-const SHOW_DURATION = true;           // Session duration
-const SHOW_TOKENS_INPUT_OUTPUT = true; // Input/Output tokens
-const SHOW_CACHE_READ = true;         // Cache read tokens and efficiency
-const SHOW_CACHE_WRITE = true;        // Cache write tokens
-const SHOW_CACHE_TTL = false;         // Cache TTL countdown timer (daemon only)
-                                      // DISABLED: Claude Code v1.0.89+ removed statusline auto-refresh,
-                                      // so countdown timer only updates on interaction (not useful)
-const SHOW_LINES = true;              // Lines added/removed
-const SHOW_200K_WARNING = true;       // Warning when exceeding 200k tokens
-
 // Path Truncation Configuration
 const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
 const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
 
-// Cache TTL Configuration
-const CACHE_TTL_YELLOW = 120;         // Turn yellow at 2 minutes
-const CACHE_TTL_RED = 45;             // Turn red at 45 seconds
+// Progress Bar Configuration
+const BAR_WIDTH = 20;                 // Width of the context window progress bar
 ```
-
-Simply set any option to `false` to hide that section from your statusline.
 
 ### Path Truncation
 
@@ -254,80 +353,6 @@ The statusline intelligently truncates long directory paths (inspired by Powerle
 **Configuration:**
 - `PATH_MAX_LENGTH`: Maximum characters (default: 40)
 - `PATH_SHORTEN_STRATEGY`: Enable/disable truncation (default: true)
-
-### Example: Minimal Statusline
-
-```javascript
-const SHOW_MODEL = false;
-const SHOW_PATH = false;
-const SHOW_GIT = false;
-const SHOW_STYLE = false;
-const SHOW_COST = false;
-const SHOW_DURATION = false;
-const SHOW_TOKENS_INPUT_OUTPUT = true;  // Only show tokens
-const SHOW_CACHE_READ = true;
-const SHOW_CACHE_WRITE = false;
-const SHOW_LINES = false;
-const SHOW_200K_WARNING = true;
-```
-
-This would display only: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ`
-
-## Statusline Indicators
-
-The statusline displays different indicators based on the data source:
-
-- **`27.8k↓ 71.9k↑ᵈ`** - Using daemon (fast, cached) - indicated by superscript `ᵈ`
-- **`27.8k↓ 71.9k↑ᶠ`** - Using fallback (direct file parsing) - indicated by superscript `ᶠ`
-- **`27.8k↓ 71.9k↑ᵈ 🔄`** - Cache rebuilding after invalidation (shown for 60s by default)
-- **`⏳ starting...`** - Daemon is starting up
-- **`[tokens N/A]`** - Token data unavailable
-
-The `ᵈ` or `ᶠ` indicator appears after each metric (input/output, cache read, cache write) to clearly show the data source.
-
-### Cache Indicators
-
-When prompt caching is active, the statusline shows cache statistics:
-
-- **`⚡151.3k (99.92%)ᵈ`** - Cache read tokens and efficiency percentage
-- **`🗂  +1.5k/150kᵈ`** - Last cache write / Total cache written (daemon mode)
-  - `+1.5k` = tokens written in the last message
-  - `150k` = cumulative total tokens written to cache
-- **`🗂  150kᶠ`** - Total cache written only (fallback mode)
-- **Full example**: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ 🗂  +1.5k/150kᵈ`
-
-Cache efficiency is calculated as: `cache_read / (input + cache_read) * 100`
-
-The 🗂 indicator shows `cache_creation_input_tokens`:
-- **Last write** (`+1.5k`) - how much cache was created in the most recent message (daemon mode only)
-- **Total** (`150k`) - cumulative cache creation for the entire session
-
-**Note**: Fallback mode (ᶠ) shows only total cache write (`🗂  150kᶠ`) for better performance. Daemon mode (ᵈ) shows detailed breakdown (`🗂  +1.5k/150kᵈ`).
-
-### Cache TTL Countdown
-
-**⚠️ DISABLED (as of Claude Code v1.0.89+)**: This feature is currently disabled because Claude Code removed statusline auto-refresh. The countdown timer only updates during interaction, making it not useful as a real-time timer.
-
-The implementation remains in the code and can be re-enabled by setting `SHOW_CACHE_TTL = true` if auto-refresh is restored in future versions.
-
-<details>
-<summary>Feature Documentation (for reference)</summary>
-
-When enabled and cache is active in daemon mode, shows time remaining until expiration:
-
-- **`⏱ 4m30sᵈ`** - Green: More than 2 minutes remaining (safe)
-- **`⏱ 1m30sᵈ`** - Yellow: 45 seconds to 2 minutes remaining (warning)
-- **`⏱ 30sᵈ`** - Red: Less than 45 seconds remaining (critical)
-- **Full example**: `27.8k↓ 71.0k↑ᵈ │ ⚡151.3k (99.92%)ᵈ 🗂  +1.5k/150kᵈ ⏱ 3m45sᵈ`
-
-Claude's prompt cache has a 5-minute TTL that refreshes when the cache is **read** (when you send a message and Claude responds using cached context). The daemon tracks the timestamp of the last cache read, and the statusline calculates the remaining time client-side on each refresh. The countdown uses 4.5 minutes (270 seconds) as a safety margin to account for latency.
-
-**Configuration:**
-- `SHOW_CACHE_TTL`: Enable/disable TTL countdown display (default: false)
-- `CACHE_TTL_YELLOW`: Seconds threshold for yellow warning (default: 120)
-- `CACHE_TTL_RED`: Seconds threshold for red critical alert (default: 45)
-
-</details>
 
 ## Font Requirements
 
@@ -374,6 +399,17 @@ lsof -i :7777
 
 # Remove stale PID file
 rm ~/.claude/token-tracker.pid
+```
+
+### Daemon returns stale/frozen data
+
+If token counts stop updating mid-session, it may be caused by a large JSONL line exceeding the scanner buffer (e.g., browser snapshots, base64 screenshots). Check the daemon logs or test directly:
+
+```bash
+# Check for scanner errors
+curl "http://localhost:7777/tokens?path=/path/to/transcript.jsonl"
+# If you see "bufio.Scanner: token too long", increase the buffer:
+~/.claude/token-tracker --max-scan-buffer 200  # 200MB max
 ```
 
 ### Statusline not showing tokens
@@ -451,7 +487,15 @@ Cache Written:        1.6m
 
 Note: 'Ctx' column shows cumulative fresh input tokens (running total)
 
-Cache Efficiency: 99.97%
+CACHE ANALYSIS:
+  Hit Rate:             99.97%  (cache_read / total_input)
+  Net Efficiency:       98.9%   (cache_read - cache_create) / total_input
+  Write Overhead:       1.1%    (cache_create / cache_read)
+  Invalidations:        1       (total drops >= 10k tokens)
+  Tokens Invalidated:   109.0k  (sum of all drops)
+  Avg per Invalidation: 109.0k
+  Cache Writes:         1.6m    (total cache_create)
+  Cache Reads:          146.7m  (total cache_read)
 
 ==================================================================================================================================
 
@@ -488,7 +532,7 @@ Savings from cache:  $43.53 (79.5%)
 - **CacheR** - Cache read tokens (retrieved from cache)
 - **CacheC** - Cache creation tokens (written to cache)
 - **Ctx** - Cumulative fresh input tokens
-- **Eff%** - Cache efficiency for this message
+- **Eff%** - Net cache efficiency for this message (accounts for cache write overhead)
 - **Event** - Cache events (🆕 START, ⚡ READ, 🔄 INVALIDATION, 📈 GROWTH)
 
 ### Use Cases

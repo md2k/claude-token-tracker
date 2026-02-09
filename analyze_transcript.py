@@ -62,6 +62,13 @@ PRICING = {
         'cache_read': 1.50,
         'output': 75.00,
     },
+    # Opus 4.6
+    'claude-opus-4-6': {
+        'input': 5.00,
+        'cache_write': 6.25,   # 1.25x
+        'cache_read': 0.50,    # 0.1x
+        'output': 25.00,
+    },
 }
 
 def analyze_transcript(transcript_path):
@@ -85,6 +92,10 @@ def analyze_transcript(transcript_path):
     total_output = 0
     total_cache_read = 0
     total_cache_create = 0
+
+    # Invalidation tracking
+    invalidation_count = 0
+    total_tokens_invalidated = 0
 
     # Track usage per model
     model_stats = {}
@@ -144,11 +155,11 @@ def analyze_transcript(transcript_path):
             model_stats[model_name]['cache_read'] += cache_read
             model_stats[model_name]['cache_create'] += cache_create
 
-            # Calculate efficiency
+            # Calculate net efficiency (accounts for cache write overhead)
             eff_str = "-"
             if cache_read > 0:
-                efficiency = (cache_read / (input_tokens + cache_read)) * 100
-                eff_str = f"{efficiency:.2f}"
+                net_eff = ((cache_read - cache_create) / (input_tokens + cache_read)) * 100
+                eff_str = f"{net_eff:.1f}"
 
             # Detect cache events
             cache_event = ""
@@ -160,6 +171,8 @@ def analyze_transcript(transcript_path):
                 drop = prev_cache_read - cache_read
                 if drop >= 10000:  # Significant drop
                     cache_event = f"🔄 INVALIDATION (↓{format_number(drop)})"
+                    invalidation_count += 1
+                    total_tokens_invalidated += drop
             elif cache_read > prev_cache_read and prev_cache_read > 0:
                 increase = cache_read - prev_cache_read
                 if increase >= 1000:  # Only show significant growth
@@ -186,9 +199,23 @@ def analyze_transcript(transcript_path):
     print(f"Cache Written:        {format_number(total_cache_create)}")
     print(f"\nNote: 'Ctx' column shows cumulative fresh input tokens (running total)")
 
+    # Comprehensive cache analysis
     if total_cache_read > 0:
-        overall_efficiency = (total_cache_read / total_actual_input) * 100
-        print(f"\nCache Efficiency: {overall_efficiency:.2f}%")
+        hit_rate = (total_cache_read / total_actual_input) * 100
+        net_efficiency = ((total_cache_read - total_cache_create) / total_actual_input) * 100
+        write_overhead = (total_cache_create / total_cache_read) * 100
+        avg_per_invalidation = (total_tokens_invalidated / invalidation_count) if invalidation_count > 0 else 0
+
+        print(f"\nCACHE ANALYSIS:")
+        print(f"  Hit Rate:             {hit_rate:.2f}%  (cache_read / total_input)")
+        print(f"  Net Efficiency:       {net_efficiency:.1f}%   (cache_read - cache_create) / total_input")
+        print(f"  Write Overhead:       {write_overhead:.1f}%    (cache_create / cache_read)")
+        print(f"  Invalidations:        {invalidation_count}       (total drops >= 10k tokens)")
+        print(f"  Tokens Invalidated:   {format_number(total_tokens_invalidated)}  (sum of all drops)")
+        if invalidation_count > 0:
+            print(f"  Avg per Invalidation: {format_number(int(avg_per_invalidation))}")
+        print(f"  Cache Writes:         {format_number(total_cache_create)}    (total cache_create)")
+        print(f"  Cache Reads:          {format_number(total_cache_read)}   (total cache_read)")
 
     # Per-model breakdown and costs
     print("\n" + "=" * 130)
@@ -236,7 +263,10 @@ def analyze_transcript(transcript_path):
 
         savings = cost_without_cache - total_cost
         print(f"\nCost without cache:  ${cost_without_cache:.2f}")
-        print(f"Savings from cache:  ${savings:.2f} ({(savings/cost_without_cache*100):.1f}%)")
+        if cost_without_cache > 0:
+            print(f"Savings from cache:  ${savings:.2f} ({(savings/cost_without_cache*100):.1f}%)")
+        else:
+            print(f"Savings from cache:  ${savings:.2f}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

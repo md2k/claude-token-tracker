@@ -23,6 +23,10 @@ type TokenUsage struct {
 	OutputTokens      int64 `json:"output_tokens"`
 	CacheReadTokens   int64 `json:"cache_read_tokens"`
 	CacheCreateTokens int64 `json:"cache_create_tokens"`
+	CacheTier5mTokens int64 `json:"cache_tier_5m_tokens"`
+	CacheTier1hTokens int64 `json:"cache_tier_1h_tokens"`
+	WebSearchCount    int64 `json:"web_search_count"`
+	WebFetchCount     int64 `json:"web_fetch_count"`
 }
 
 // SessionTracker tracks a single transcript file
@@ -40,9 +44,16 @@ type SessionTracker struct {
 	parseCount            int64
 	totalParseTime        time.Duration
 	cacheInvalidatedAt    time.Time
-	lastCacheReadTokens   int64
-	lastCacheCreateTokens int64
-	lastCacheReadTime     time.Time
+	lastCacheReadTokens    int64
+	lastCacheCreateTokens  int64
+	lastCacheTier5mTokens  int64
+	lastCacheTier1hTokens  int64
+	lastCacheReadTime      time.Time
+	lastCacheEvent         string
+	prevCacheReadTokens    int64
+	prevCacheCreateTokens  int64
+	invalidationCount      int64
+	totalTokensInvalidated int64
 }
 
 // Config holds daemon configuration
@@ -52,6 +63,7 @@ type Config struct {
 	IdleTimeout               time.Duration
 	CacheRebuildAlertDuration time.Duration
 	CacheDropThreshold        int64
+	MaxScanBufferSize         int
 	LogLevel                  string
 	PIDFile                   string
 	NeverTimeout              bool
@@ -128,6 +140,7 @@ func parseFlags() Config {
 	idleTimeoutStr := flag.String("idle-timeout", "10m", "Daemon idle shutdown timeout (e.g., 10m, 1h, or 'never')")
 	cacheRebuildAlertStr := flag.String("cache-rebuild-alert", "60s", "Cache rebuild alert duration (e.g., 30s, 60s, 90s)")
 	cacheDropThreshold := flag.Int64("cache-drop-threshold", 10000, "Cache drop threshold in tokens to detect invalidation (default: 10000)")
+	maxScanBuffer := flag.Int("max-scan-buffer", 100, "Max scanner buffer size in MB for parsing large JSONL lines (default: 100)")
 	logLevel := flag.String("log-level", "info", "Log level (info, silent)")
 	pidFile := flag.String("pid-file", "", "PID file path (default: ~/.claude/token-tracker.pid)")
 
@@ -183,6 +196,7 @@ func parseFlags() Config {
 		IdleTimeout:               idleTimeout,
 		CacheRebuildAlertDuration: cacheRebuildAlert,
 		CacheDropThreshold:        *cacheDropThreshold,
+		MaxScanBufferSize:         *maxScanBuffer * 1024 * 1024,
 		LogLevel:                  *logLevel,
 		PIDFile:                   pidPath,
 		NeverTimeout:              neverTimeout,
@@ -284,7 +298,12 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 	usage := tracker.usage
 	cacheInvalidatedAt := tracker.cacheInvalidatedAt
 	lastCacheCreate := tracker.lastCacheCreateTokens
+	lastTier5m := tracker.lastCacheTier5mTokens
+	lastTier1h := tracker.lastCacheTier1hTokens
 	lastCacheReadTime := tracker.lastCacheReadTime
+	cacheEvent := tracker.lastCacheEvent
+	invalidationCount := tracker.invalidationCount
+	totalTokensInvalidated := tracker.totalTokensInvalidated
 	tracker.mu.RUnlock()
 
 	// Check if cache is currently rebuilding
@@ -304,9 +323,18 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 		"output_tokens":             usage.OutputTokens,
 		"cache_read_tokens":         usage.CacheReadTokens,
 		"cache_create_tokens":       usage.CacheCreateTokens,
-		"last_cache_create_tokens":  lastCacheCreate,
-		"cache_rebuilding":          cacheRebuilding,
-		"cache_last_read_timestamp": cacheLastReadTimestamp,
+		"cache_tier_5m_tokens":      usage.CacheTier5mTokens,
+		"cache_tier_1h_tokens":      usage.CacheTier1hTokens,
+		"web_search_count":          usage.WebSearchCount,
+		"web_fetch_count":           usage.WebFetchCount,
+		"last_cache_create_tokens":    lastCacheCreate,
+		"last_cache_tier_5m_tokens":  lastTier5m,
+		"last_cache_tier_1h_tokens":  lastTier1h,
+		"cache_event":                cacheEvent,
+		"cache_rebuilding":           cacheRebuilding,
+		"cache_last_read_timestamp":  cacheLastReadTimestamp,
+		"invalidation_count":         invalidationCount,
+		"total_tokens_invalidated":   totalTokensInvalidated,
 	})
 }
 
@@ -380,6 +408,16 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 		"idle_for":            time.Since(lastReq).Round(time.Second).String(),
 		"sessions":            sessions,
 	})
+}
+
+func formatTokens(n int64) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fm", float64(n)/1000000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func formatIdleTimeout(config Config) string {
@@ -486,6 +524,7 @@ func (t *SessionTracker) parseFile() error {
 
 	// Parse new lines
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), daemon.config.MaxScanBufferSize) // start at 64KB, grow up to --max-scan-buffer
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.Contains(line, `"usage"`) {
@@ -518,6 +557,28 @@ func (t *SessionTracker) parseFile() error {
 			cacheCreate = int64(val)
 		}
 
+		// Extract cache tier breakdown
+		var tier5m, tier1h int64
+		if cacheCreation, ok := usage["cache_creation"].(map[string]interface{}); ok {
+			if val, ok := cacheCreation["ephemeral_5m_input_tokens"].(float64); ok {
+				tier5m = int64(val)
+			}
+			if val, ok := cacheCreation["ephemeral_1h_input_tokens"].(float64); ok {
+				tier1h = int64(val)
+			}
+		}
+
+		// Extract web search/fetch counts
+		var webSearch, webFetch int64
+		if serverToolUse, ok := usage["server_tool_use"].(map[string]interface{}); ok {
+			if val, ok := serverToolUse["web_search_requests"].(float64); ok {
+				webSearch = int64(val)
+			}
+			if val, ok := serverToolUse["web_fetch_requests"].(float64); ok {
+				webFetch = int64(val)
+			}
+		}
+
 		// Update totals first
 		t.mu.Lock()
 		if val, ok := usage["input_tokens"].(float64); ok {
@@ -530,29 +591,49 @@ func (t *SessionTracker) parseFile() error {
 		// Update token counts
 		t.usage.CacheReadTokens += cacheRead
 		t.usage.CacheCreateTokens += cacheCreate
+		t.usage.CacheTier5mTokens += tier5m
+		t.usage.CacheTier1hTokens += tier1h
+		t.usage.WebSearchCount += webSearch
+		t.usage.WebFetchCount += webFetch
 
 		// Track the last individual cache create value (not cumulative)
 		t.lastCacheCreateTokens = cacheCreate
+		t.lastCacheTier5mTokens = tier5m
+		t.lastCacheTier1hTokens = tier1h
 
-		// Detect cache invalidation via large drop in cache_read
-		// This handles checkpoint-based cache expiration where segments expire gradually
-		if t.lastCacheReadTokens > 0 && cacheRead < t.lastCacheReadTokens {
-			drop := t.lastCacheReadTokens - cacheRead
+		// Detect cache events (same logic as analyze_transcript.py)
+		// Priority: INVALIDATION > START > READ > GREW
+		if t.prevCacheReadTokens > 0 && cacheRead < t.prevCacheReadTokens {
+			drop := t.prevCacheReadTokens - cacheRead
 			if drop >= daemon.config.CacheDropThreshold {
 				t.cacheInvalidatedAt = time.Now()
+				t.lastCacheEvent = fmt.Sprintf("🔄 INVALIDATION (↓%s)", formatTokens(drop))
+				t.invalidationCount++
+				t.totalTokensInvalidated += drop
 				logger.Printf("Cache invalidation detected for %s: %d tokens dropped (was %d, now %d)",
-					t.path, drop, t.lastCacheReadTokens, cacheRead)
+					t.path, drop, t.prevCacheReadTokens, cacheRead)
+			}
+		} else if cacheCreate > 0 && t.prevCacheCreateTokens == 0 {
+			t.lastCacheEvent = "🆕 CACHE START"
+		} else if cacheRead > 0 && t.prevCacheReadTokens == 0 {
+			t.lastCacheEvent = "⚡ CACHE READ"
+		} else if cacheRead > t.prevCacheReadTokens && t.prevCacheReadTokens > 0 {
+			increase := cacheRead - t.prevCacheReadTokens
+			if increase >= 1000 {
+				t.lastCacheEvent = fmt.Sprintf("📈 GREW (+%s)", formatTokens(increase))
 			}
 		}
 
+		// Update previous values for next comparison
+		t.prevCacheReadTokens = cacheRead
+		t.prevCacheCreateTokens = cacheCreate
+
 		// Track when cache was last read (for TTL countdown)
-		// Cache TTL is refreshed when cache is READ (when user sends message), not written
-		// Only update timestamp when we see a NEW cache_read value (different from last)
 		if cacheRead > 0 && cacheRead != t.lastCacheReadTokens {
 			t.lastCacheReadTime = time.Now()
 		}
 
-		// Update last cache read value for next comparison
+		// Update last cache read value
 		if cacheRead > 0 {
 			t.lastCacheReadTokens = cacheRead
 		}
