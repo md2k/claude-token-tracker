@@ -52,6 +52,8 @@ type SessionTracker struct {
 	lastCacheEvent         string
 	prevCacheReadTokens    int64
 	prevCacheCreateTokens  int64
+	invalidationCount      int64
+	totalTokensInvalidated int64
 }
 
 // Config holds daemon configuration
@@ -300,6 +302,8 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 	lastTier1h := tracker.lastCacheTier1hTokens
 	lastCacheReadTime := tracker.lastCacheReadTime
 	cacheEvent := tracker.lastCacheEvent
+	invalidationCount := tracker.invalidationCount
+	totalTokensInvalidated := tracker.totalTokensInvalidated
 	tracker.mu.RUnlock()
 
 	// Check if cache is currently rebuilding
@@ -329,6 +333,8 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 		"cache_event":                cacheEvent,
 		"cache_rebuilding":           cacheRebuilding,
 		"cache_last_read_timestamp":  cacheLastReadTimestamp,
+		"invalidation_count":         invalidationCount,
+		"total_tokens_invalidated":   totalTokensInvalidated,
 	})
 }
 
@@ -602,6 +608,8 @@ func (t *SessionTracker) parseFile() error {
 			if drop >= daemon.config.CacheDropThreshold {
 				t.cacheInvalidatedAt = time.Now()
 				t.lastCacheEvent = fmt.Sprintf("🔄 INVALIDATION (↓%s)", formatTokens(drop))
+				t.invalidationCount++
+				t.totalTokensInvalidated += drop
 				logger.Printf("Cache invalidation detected for %s: %d tokens dropped (was %d, now %d)",
 					t.path, drop, t.prevCacheReadTokens, cacheRead)
 			}

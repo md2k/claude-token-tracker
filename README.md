@@ -163,7 +163,9 @@ curl http://localhost:7777/shutdown
   #   "last_cache_tier_1h_tokens": 0,
   #   "cache_event": "📈 GREW (+1.3k)",
   #   "cache_rebuilding": false,
-  #   "cache_last_read_timestamp": 1770640116
+  #   "cache_last_read_timestamp": 1770640116,
+  #   "invalidation_count": 4,
+  #   "total_tokens_invalidated": 284900
   # }
   ```
 
@@ -182,6 +184,8 @@ curl http://localhost:7777/shutdown
   - `cache_event`: Latest cache lifecycle event (`🆕 CACHE START`, `⚡ CACHE READ`, `🔄 INVALIDATION (↓Xk)`, `📈 GREW (+Xk)`, or empty)
   - `cache_rebuilding`: Boolean indicating if cache is currently rebuilding
   - `cache_last_read_timestamp`: Unix timestamp of last cache read (0 if no active cache)
+  - `invalidation_count`: Number of cache invalidations detected (drops ≥ 10k tokens)
+  - `total_tokens_invalidated`: Sum of all cache_read drops across invalidations
 
 - **`GET /status`** - Daemon status and active sessions
   ```bash
@@ -232,7 +236,7 @@ Opus 4.6       │ 200k ctx │ 🤖 agent │ $17.42 │ 98m56s (API: 32m10s) �
 
 **Line 2 — Progress Bar, Tokens, Cache & Metrics**
 ```
-▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░  51% │ 818↓ 27.1k↑ᵈ │ ⚡ 12.6m (99.99%)ᵈ │ 🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ │ 📈 GREW (+1.3k) │ 🔍 0  📥 0 │ +431 -273
+▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░  51% │ 818↓ 27.1k↑ᵈ │ ⚡ 12.6m (97.1%)ᵈ │ 🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ │ 📈 GREW (+1.3k) │ 🔍 0  📥 0 │ +431 -273
 ```
 
 ### Line 1 — Section by Section
@@ -254,7 +258,7 @@ Opus 4.6       │ 200k ctx │ 🤖 agent │ $17.42 │ 98m56s (API: 32m10s) �
 |---------|---------|--------|-------------|
 | Progress bar | `▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░ 51%` | `context_window.used_percentage` | Context window usage with color-coded bands |
 | Tokens | `818↓ 27.1k↑ᵈ` | daemon / fallback | Fresh input ↓ and output ↑ tokens |
-| Cache read | `⚡ 12.6m (99.99%)ᵈ` | daemon / fallback | Cache read tokens and efficiency % |
+| Cache read | `⚡ 12.6m (97.1%)ᵈ` | daemon / fallback | Cache read tokens and net efficiency % (accounts for write overhead) |
 | Cache write | `🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ` | daemon / fallback | Last write per tier + total cumulative |
 | Cache event | `📈 GREW (+1.3k)` | daemon / fallback | Latest cache lifecycle event |
 | Web tools | `🔍 0  📥 0` | daemon / fallback | Cumulative web search and fetch counts |
@@ -312,7 +316,9 @@ These events use the same detection logic as `analyze_transcript.py`. The status
 - **`0 (1h)`** — last message wrote 0 tokens to the 1-hour ephemeral cache
 - **`/ 1.7m`** — total cumulative tokens written to cache this session
 
-Cache efficiency: `cache_read / (input + cache_read) * 100`
+Cache net efficiency: `(cache_read - cache_create) / (input + cache_read) * 100`
+
+Unlike hit rate (`cache_read / total_input`), net efficiency subtracts the cost of cache writes from the benefit of cache reads. This prevents misleading 99.99% efficiency numbers when sessions have significant cache invalidations and rewrites.
 
 ## Customization
 
@@ -481,7 +487,15 @@ Cache Written:        1.6m
 
 Note: 'Ctx' column shows cumulative fresh input tokens (running total)
 
-Cache Efficiency: 99.97%
+CACHE ANALYSIS:
+  Hit Rate:             99.97%  (cache_read / total_input)
+  Net Efficiency:       98.9%   (cache_read - cache_create) / total_input
+  Write Overhead:       1.1%    (cache_create / cache_read)
+  Invalidations:        1       (total drops >= 10k tokens)
+  Tokens Invalidated:   109.0k  (sum of all drops)
+  Avg per Invalidation: 109.0k
+  Cache Writes:         1.6m    (total cache_create)
+  Cache Reads:          146.7m  (total cache_read)
 
 ==================================================================================================================================
 
@@ -518,7 +532,7 @@ Savings from cache:  $43.53 (79.5%)
 - **CacheR** - Cache read tokens (retrieved from cache)
 - **CacheC** - Cache creation tokens (written to cache)
 - **Ctx** - Cumulative fresh input tokens
-- **Eff%** - Cache efficiency for this message
+- **Eff%** - Net cache efficiency for this message (accounts for cache write overhead)
 - **Event** - Cache events (🆕 START, ⚡ READ, 🔄 INVALIDATION, 📈 GROWTH)
 
 ### Use Cases
