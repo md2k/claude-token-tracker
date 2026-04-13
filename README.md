@@ -78,7 +78,8 @@ Edit `~/.claude/settings.json` and add:
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/statusline.mjs"
+    "command": "~/.claude/statusline.mjs",
+    "refreshInterval": 10
   }
 }
 ```
@@ -126,6 +127,9 @@ curl http://localhost:7777/shutdown
 --cache-rebuild-alert <duration> Duration to show cache rebuild alert (default: 60s)
                               Shows 🔄 icon for this duration after cache invalidation
                               Examples: 30s, 60s, 90s
+--cache-ttl-offset <duration>  Safety margin for cache TTL countdown (default: 10s)
+                              Subtracted from 5-minute TTL for conservative countdown
+                              Examples: 10s, 20s, 30s
 --cache-drop-threshold <tokens> Token count drop to detect cache invalidation (default: 10000)
                               Detects checkpoint-based cache expiration
 --max-scan-buffer <MB>        Max scanner buffer size in MB for parsing large JSONL lines
@@ -164,6 +168,7 @@ curl http://localhost:7777/shutdown
   #   "cache_event": "📈 GREW (+1.3k)",
   #   "cache_rebuilding": false,
   #   "cache_last_read_timestamp": 1770640116,
+  #   "cache_ttl_offset_seconds": 10,
   #   "invalidation_count": 4,
   #   "total_tokens_invalidated": 284900
   # }
@@ -183,7 +188,8 @@ curl http://localhost:7777/shutdown
   - `last_cache_tier_1h_tokens`: Last message's tokens written to 1-hour tier
   - `cache_event`: Latest cache lifecycle event (`🆕 CACHE START`, `⚡ CACHE READ`, `🔄 INVALIDATION (↓Xk)`, `📈 GREW (+Xk)`, or empty)
   - `cache_rebuilding`: Boolean indicating if cache is currently rebuilding
-  - `cache_last_read_timestamp`: Unix timestamp of last cache read (0 if no active cache)
+  - `cache_last_read_timestamp`: Unix timestamp of last cache read, sourced from transcript timestamps for accuracy (0 if no active cache)
+  - `cache_ttl_offset_seconds`: Configured safety margin for TTL countdown (default: 10s)
   - `invalidation_count`: Number of cache invalidations detected (drops ≥ 10k tokens)
   - `total_tokens_invalidated`: Sum of all cache_read drops across invalidations
 
@@ -236,7 +242,7 @@ Opus 4.6       │ 200k ctx │ 🤖 agent │ $17.42 │ 98m56s (API: 32m10s) �
 
 **Line 2 — Progress Bar, Tokens, Cache & Metrics**
 ```
-▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░  51% │ 818↓ 27.1k↑ᵈ │ ⚡ 12.6m (97.1%)ᵈ │ 🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ │ 📈 GREW (+1.3k) │ 🔍 0  📥 0 │ +431 -273
+▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░  51% │ 818↓ 27.1k↑ᵈ │ ⚡ 12.6m (97.1%)ᵈ │ 🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ │ 📈 GREW (+1.3k) │ ⏱ 4m12s │ 🔍 0  📥 0 │ +431 -273
 ```
 
 ### Line 1 — Section by Section
@@ -261,6 +267,7 @@ Opus 4.6       │ 200k ctx │ 🤖 agent │ $17.42 │ 98m56s (API: 32m10s) �
 | Cache read | `⚡ 12.6m (97.1%)ᵈ` | daemon / fallback | Cache read tokens and net efficiency % (accounts for write overhead) |
 | Cache write | `🗂  +1.7k (5m)  0 (1h) / 1.7mᵈ` | daemon / fallback | Last write per tier + total cumulative |
 | Cache event | `📈 GREW (+1.3k)` | daemon / fallback | Latest cache lifecycle event |
+| Cache TTL | `⏱ 4m12s` | daemon | Time until 5-minute cache expires (green/yellow/red) |
 | Web tools | `🔍 0  📥 0` | daemon / fallback | Cumulative web search and fetch counts |
 | Lines | `+431 -273` | `cost.total_lines_added/removed` | Lines added/removed in session |
 
@@ -290,6 +297,7 @@ Color-coded 20% bands based on context window usage:
 | `✚` | Staged changes |
 | `✘` | Modified (unstaged) changes |
 | `?` | Untracked files |
+| `⏱` | Cache TTL countdown (time until 5m cache expires) |
 | `⚠200k` | Context window exceeds 200k tokens |
 | `⏳` | Daemon starting up |
 
@@ -328,6 +336,9 @@ You can customize the statusline by editing `~/.claude/statusline.mjs`. Configur
 // Path Truncation Configuration
 const PATH_MAX_LENGTH = 40;           // Maximum path length before truncation
 const PATH_SHORTEN_STRATEGY = true;   // Enable intelligent path shortening
+
+// Cache TTL Countdown Configuration
+const CACHE_TTL_COUNTDOWN = true;     // Set to false to hide the countdown
 
 // Progress Bar Configuration
 const BAR_WIDTH = 20;                 // Width of the context window progress bar
@@ -546,7 +557,7 @@ Savings from cache:  $43.53 (79.5%)
 ## Integration
 
 The statusline script integrates seamlessly with Claude Code:
-- Updates every 300ms (Claude Code refresh rate)
+- Updates on each assistant message + every `refreshInterval` seconds (default: 10s)
 - Auto-starts daemon on first request
 - Graceful fallback ensures tokens always display
 - Daemon auto-stops when Claude sessions end
