@@ -43,6 +43,9 @@ const RETRY_DELAY = 100;
 const PATH_MAX_LENGTH = 40;
 const PATH_SHORTEN_STRATEGY = true;
 
+// Cache TTL Countdown Configuration
+const CACHE_TTL_COUNTDOWN = true;  // set to false to hide the countdown
+
 // Progress Bar Configuration
 const BAR_WIDTH = 20;
 
@@ -102,6 +105,8 @@ let invalidationCount = 0, totalTokensInvalidated = 0;
 let tokenStatus = 'ok'; // 'ok', 'starting', 'unavailable'
 let cacheRebuilding = false;
 let cacheEvent = '';
+let cacheLastReadTimestamp = 0;
+let cacheTTLOffset = 20;
 
 if (transcriptPath) {
   let tokens = null;
@@ -150,6 +155,8 @@ if (transcriptPath) {
     cacheEvent = tokens.cache_event || '';
     invalidationCount = tokens.invalidation_count || 0;
     totalTokensInvalidated = tokens.total_tokens_invalidated || 0;
+    cacheLastReadTimestamp = tokens.cache_last_read_timestamp || 0;
+    cacheTTLOffset = tokens.cache_ttl_offset_seconds || 20;
   } else if (tokenStatus === 'starting') {
     // Keep starting status
   } else {
@@ -360,6 +367,33 @@ if (tokenStatus === 'starting') {
     line2Parts.push(`${esc(evtColor)}${cacheEvent}${reset}`);
   } else {
     line2Parts.push(na('no event'));
+  }
+
+  // Cache TTL countdown — optional, toggle via CACHE_TTL_COUNTDOWN
+  if (CACHE_TTL_COUNTDOWN) {
+    if (cacheLastReadTimestamp > 0) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const age = nowSec - cacheLastReadTimestamp;
+      const ttl = 300 - cacheTTLOffset;
+      const remaining = ttl - age;
+
+      let ttlColor, ttlText;
+      if (remaining <= 0) {
+        ttlColor = '2';           // dim for expired
+        ttlText = '⏱ EXPIRED';
+      } else {
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        ttlText = `⏱ ${mins}m${secs.toString().padStart(2, '0')}s`;
+
+        if (remaining > 120)      ttlColor = '38;5;82';   // green > 2min
+        else if (remaining > 60)  ttlColor = '38;5;226';  // yellow 1-2min
+        else                      ttlColor = '38;5;196';  // red < 1min
+      }
+      line2Parts.push(`${esc(ttlColor)}${ttlText}${reset}`);
+    } else {
+      line2Parts.push(na('⏱ —'));
+    }
   }
 }
 

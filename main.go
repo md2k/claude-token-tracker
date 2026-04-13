@@ -62,6 +62,7 @@ type Config struct {
 	Timeout                   time.Duration
 	IdleTimeout               time.Duration
 	CacheRebuildAlertDuration time.Duration
+	CacheTTLOffset            time.Duration
 	CacheDropThreshold        int64
 	MaxScanBufferSize         int
 	LogLevel                  string
@@ -141,6 +142,7 @@ func parseFlags() Config {
 	cacheRebuildAlertStr := flag.String("cache-rebuild-alert", "60s", "Cache rebuild alert duration (e.g., 30s, 60s, 90s)")
 	cacheDropThreshold := flag.Int64("cache-drop-threshold", 10000, "Cache drop threshold in tokens to detect invalidation (default: 10000)")
 	maxScanBuffer := flag.Int("max-scan-buffer", 100, "Max scanner buffer size in MB for parsing large JSONL lines (default: 100)")
+	cacheTTLOffsetStr := flag.String("cache-ttl-offset", "10s", "Safety margin subtracted from cache TTL countdown (e.g., 10s, 30s)")
 	logLevel := flag.String("log-level", "info", "Log level (info, silent)")
 	pidFile := flag.String("pid-file", "", "PID file path (default: ~/.claude/token-tracker.pid)")
 
@@ -180,6 +182,12 @@ func parseFlags() Config {
 		log.Fatalf("Invalid cache-rebuild-alert format: %v", err)
 	}
 
+	// Parse cache TTL offset
+	cacheTTLOffset, err := time.ParseDuration(*cacheTTLOffsetStr)
+	if err != nil {
+		log.Fatalf("Invalid cache-ttl-offset format: %v", err)
+	}
+
 	// Determine PID file path
 	pidPath := *pidFile
 	if pidPath == "" {
@@ -195,6 +203,7 @@ func parseFlags() Config {
 		Timeout:                   timeout,
 		IdleTimeout:               idleTimeout,
 		CacheRebuildAlertDuration: cacheRebuildAlert,
+		CacheTTLOffset:            cacheTTLOffset,
 		CacheDropThreshold:        *cacheDropThreshold,
 		MaxScanBufferSize:         *maxScanBuffer * 1024 * 1024,
 		LogLevel:                  *logLevel,
@@ -333,6 +342,7 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 		"cache_event":                cacheEvent,
 		"cache_rebuilding":           cacheRebuilding,
 		"cache_last_read_timestamp":  cacheLastReadTimestamp,
+		"cache_ttl_offset_seconds":   int(daemon.config.CacheTTLOffset.Seconds()),
 		"invalidation_count":         invalidationCount,
 		"total_tokens_invalidated":   totalTokensInvalidated,
 	})
@@ -536,6 +546,19 @@ func (t *SessionTracker) parseFile() error {
 			continue
 		}
 
+		// Extract timestamp from JSONL line (ISO 8601)
+		var lineTimestamp time.Time
+		if ts, ok := data["timestamp"].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				lineTimestamp = parsed
+			} else if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
+				lineTimestamp = parsed
+			}
+		}
+		if lineTimestamp.IsZero() {
+			lineTimestamp = time.Now() // fallback if no timestamp in line
+		}
+
 		// Extract usage data
 		var usage map[string]interface{}
 		if msg, ok := data["message"].(map[string]interface{}); ok {
@@ -606,7 +629,7 @@ func (t *SessionTracker) parseFile() error {
 		if t.prevCacheReadTokens > 0 && cacheRead < t.prevCacheReadTokens {
 			drop := t.prevCacheReadTokens - cacheRead
 			if drop >= daemon.config.CacheDropThreshold {
-				t.cacheInvalidatedAt = time.Now()
+				t.cacheInvalidatedAt = lineTimestamp
 				t.lastCacheEvent = fmt.Sprintf("🔄 INVALIDATION (↓%s)", formatTokens(drop))
 				t.invalidationCount++
 				t.totalTokensInvalidated += drop
@@ -629,8 +652,10 @@ func (t *SessionTracker) parseFile() error {
 		t.prevCacheCreateTokens = cacheCreate
 
 		// Track when cache was last read (for TTL countdown)
-		if cacheRead > 0 && cacheRead != t.lastCacheReadTokens {
-			t.lastCacheReadTime = time.Now()
+		// Uses transcript timestamp for accuracy instead of daemon wall-clock
+		// Any cache read refreshes the 5m TTL, even if token count unchanged
+		if cacheRead > 0 {
+			t.lastCacheReadTime = lineTimestamp
 		}
 
 		// Update last cache read value
