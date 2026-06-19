@@ -2,7 +2,7 @@
 
 A lightweight Go daemon that tracks token usage for Claude Code sessions in real-time.
 
-<img width="1261" height="119" alt="image" src="https://github.com/user-attachments/assets/534030a3-a685-4835-8ac1-d36f61346dd3" />
+<img width="1551" height="90" alt="Claude Token Counter statusline" src="docs/statusline.png" />
 
 ## Features
 
