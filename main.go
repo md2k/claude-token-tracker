@@ -31,19 +31,19 @@ type TokenUsage struct {
 
 // SessionTracker tracks a single transcript file
 type SessionTracker struct {
-	path                  string
-	lastSize              int64
-	lastModTime           time.Time
-	lastAccess            time.Time
-	startTime             time.Time
-	usage                 TokenUsage
-	mu                    sync.RWMutex
-	watcher               *fsnotify.Watcher
-	stopChan              chan struct{}
-	stopped               bool
-	parseCount            int64
-	totalParseTime        time.Duration
-	cacheInvalidatedAt    time.Time
+	path                   string
+	lastSize               int64
+	lastModTime            time.Time
+	lastAccess             time.Time
+	startTime              time.Time
+	usage                  TokenUsage
+	mu                     sync.RWMutex
+	watcher                *fsnotify.Watcher
+	stopChan               chan struct{}
+	stopped                bool
+	parseCount             int64
+	totalParseTime         time.Duration
+	cacheInvalidatedAt     time.Time
 	lastCacheReadTokens    int64
 	lastCacheCreateTokens  int64
 	lastCacheTier5mTokens  int64
@@ -54,6 +54,7 @@ type SessionTracker struct {
 	prevCacheCreateTokens  int64
 	invalidationCount      int64
 	totalTokensInvalidated int64
+	seenMessageIDs         map[string]bool // dedupe: transcript logs each API message 2-3x; count each once
 }
 
 // Config holds daemon configuration
@@ -73,12 +74,12 @@ type Config struct {
 
 // Daemon manages all session trackers
 type Daemon struct {
-	config       Config
-	sessions     map[string]*SessionTracker
-	mu           sync.RWMutex
-	cleanupCh    chan struct{}
-	lastRequest  time.Time
-	requestMu    sync.RWMutex
+	config      Config
+	sessions    map[string]*SessionTracker
+	mu          sync.RWMutex
+	cleanupCh   chan struct{}
+	lastRequest time.Time
+	requestMu   sync.RWMutex
 }
 
 var (
@@ -336,15 +337,15 @@ func tokensHandler(w http.ResponseWriter, r *http.Request) {
 		"cache_tier_1h_tokens":      usage.CacheTier1hTokens,
 		"web_search_count":          usage.WebSearchCount,
 		"web_fetch_count":           usage.WebFetchCount,
-		"last_cache_create_tokens":    lastCacheCreate,
-		"last_cache_tier_5m_tokens":  lastTier5m,
-		"last_cache_tier_1h_tokens":  lastTier1h,
-		"cache_event":                cacheEvent,
-		"cache_rebuilding":           cacheRebuilding,
-		"cache_last_read_timestamp":  cacheLastReadTimestamp,
-		"cache_ttl_offset_seconds":   int(daemon.config.CacheTTLOffset.Seconds()),
-		"invalidation_count":         invalidationCount,
-		"total_tokens_invalidated":   totalTokensInvalidated,
+		"last_cache_create_tokens":  lastCacheCreate,
+		"last_cache_tier_5m_tokens": lastTier5m,
+		"last_cache_tier_1h_tokens": lastTier1h,
+		"cache_event":               cacheEvent,
+		"cache_rebuilding":          cacheRebuilding,
+		"cache_last_read_timestamp": cacheLastReadTimestamp,
+		"cache_ttl_offset_seconds":  int(daemon.config.CacheTTLOffset.Seconds()),
+		"invalidation_count":        invalidationCount,
+		"total_tokens_invalidated":  totalTokensInvalidated,
 	})
 }
 
@@ -411,12 +412,12 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"active_sessions":     sessionCount,
-		"session_timeout":     formatTimeout(daemon.config),
-		"idle_timeout":        formatIdleTimeout(daemon.config),
-		"last_request":        lastReq.Format(time.RFC3339),
-		"idle_for":            time.Since(lastReq).Round(time.Second).String(),
-		"sessions":            sessions,
+		"active_sessions": sessionCount,
+		"session_timeout": formatTimeout(daemon.config),
+		"idle_timeout":    formatIdleTimeout(daemon.config),
+		"last_request":    lastReq.Format(time.RFC3339),
+		"idle_for":        time.Since(lastReq).Round(time.Second).String(),
+		"sessions":        sessions,
 	})
 }
 
@@ -476,11 +477,12 @@ func newSessionTracker(path string) (*SessionTracker, error) {
 
 	now := time.Now()
 	tracker := &SessionTracker{
-		path:       path,
-		lastAccess: now,
-		startTime:  now,
-		watcher:    watcher,
-		stopChan:   make(chan struct{}),
+		path:           path,
+		lastAccess:     now,
+		startTime:      now,
+		watcher:        watcher,
+		stopChan:       make(chan struct{}),
+		seenMessageIDs: make(map[string]bool),
 	}
 
 	// Initial parse
@@ -561,14 +563,30 @@ func (t *SessionTracker) parseFile() error {
 
 		// Extract usage data
 		var usage map[string]interface{}
+		var msgID string
 		if msg, ok := data["message"].(map[string]interface{}); ok {
 			usage, _ = msg["usage"].(map[string]interface{})
+			if id, ok := msg["id"].(string); ok {
+				msgID = id
+			}
 		}
 		if usage == nil {
 			usage, _ = data["usage"].(map[string]interface{})
 		}
 		if usage == nil {
 			continue
+		}
+
+		// Dedupe by API message id: the transcript logs the same message
+		// (msg_ id) 2-3x; without this, token totals inflate ~2-3x.
+		if msgID != "" {
+			t.mu.Lock()
+			if t.seenMessageIDs[msgID] {
+				t.mu.Unlock()
+				continue
+			}
+			t.seenMessageIDs[msgID] = true
+			t.mu.Unlock()
 		}
 
 		// Extract token values
