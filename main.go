@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -249,7 +250,8 @@ func processExists(pid int) bool {
 	if err != nil {
 		return false
 	}
-	err = process.Signal(os.Signal(nil))
+	// Signal 0 probes for existence; os.Signal(nil) is always rejected as unsupported
+	err = process.Signal(syscall.Signal(0))
 	return err == nil
 }
 
