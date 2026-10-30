@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -95,7 +96,7 @@ func main() {
 	// Setup logger
 	logger = log.New(os.Stdout, "", log.LstdFlags)
 	if config.LogLevel == "silent" {
-		logger.SetOutput(os.NewFile(0, os.DevNull))
+		logger.SetOutput(io.Discard)
 	}
 
 	// Write PID file
