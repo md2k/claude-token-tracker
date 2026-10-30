@@ -35,7 +35,9 @@ const DAEMON_PATH = join(homedir(), '.claude', 'token-tracker');
 const DAEMON_TIMEOUT = '5m';
 const DAEMON_LOG_LEVEL = 'silent';
 const HEALTH_TIMEOUT = 200;
+const TOKENS_TIMEOUT = 1000;
 const STARTUP_WAIT = 250;
+const STARTUP_POLL = 25;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 100;
 
@@ -49,18 +51,25 @@ const CACHE_TTL_COUNTDOWN = true;  // set to false to hide the countdown
 // Progress Bar Configuration
 const BAR_WIDTH = 20;
 
-// Helper function to check daemon health
-function checkDaemonHealth() {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Query the daemon in-process. Spawning sh+curl per request costs 50-300ms when
+// many sessions refresh at once, which blew the health timeout and made a
+// running daemon look dead.
+async function daemonGet(path, timeoutMs) {
   try {
-    const response = execSync(`curl -s --max-time ${HEALTH_TIMEOUT / 1000} http://localhost:${DAEMON_PORT}/health`, {
-      encoding: 'utf-8',
-      timeout: HEALTH_TIMEOUT + 100
-    });
-    const data = JSON.parse(response);
-    return data.status === 'ok';
-  } catch {
-    return false;
+    const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}${path}`, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok ? { state: 'ok', data: await res.json() } : { state: 'error' };
+  } catch (err) {
+    // Only a refused connection means nothing is listening; a timeout means busy
+    return { state: err?.cause?.code === 'ECONNREFUSED' ? 'down' : 'error' };
   }
+}
+
+// Returns 'ok', 'down' (nothing listening) or 'error' (listening, but slow or bad reply)
+async function checkDaemonHealth() {
+  const { state, data } = await daemonGet('/health', HEALTH_TIMEOUT);
+  return state === 'ok' && data?.status !== 'ok' ? 'error' : state;
 }
 
 // Helper function to start daemon
@@ -85,16 +94,9 @@ function startDaemon() {
 }
 
 // Helper function to fetch tokens from daemon
-function fetchTokensFromDaemon(path) {
-  try {
-    const response = execSync(
-      `curl -s --max-time 1 "http://localhost:${DAEMON_PORT}/tokens?path=${encodeURIComponent(path)}"`,
-      { encoding: 'utf-8', timeout: 1100 }
-    );
-    return JSON.parse(response);
-  } catch {
-    return null;
-  }
+async function fetchTokensFromDaemon(path) {
+  const { state, data } = await daemonGet(`/tokens?path=${encodeURIComponent(path)}`, TOKENS_TIMEOUT);
+  return state === 'ok' ? data : null;
 }
 
 // Get token usage with daemon integration
@@ -110,15 +112,17 @@ let cacheTTLOffset = 20;
 
 if (transcriptPath) {
   let tokens = null;
-  let daemonHealthy = checkDaemonHealth();
+  let health = await checkDaemonHealth();
 
-  if (!daemonHealthy) {
+  // Start the daemon only when nothing is listening; a second one would just fail to bind
+  if (health === 'down') {
     if (startDaemon()) {
       tokenStatus = 'starting';
       const startTime = Date.now();
       while (Date.now() - startTime < STARTUP_WAIT) {
-        if (checkDaemonHealth()) {
-          daemonHealthy = true;
+        await sleep(STARTUP_POLL);
+        if ((await checkDaemonHealth()) === 'ok') {
+          health = 'ok';
           tokenStatus = 'ok';
           break;
         }
@@ -126,11 +130,12 @@ if (transcriptPath) {
     }
   }
 
-  if (daemonHealthy) {
+  // A slow health check still gets a chance to answer /tokens
+  if (health !== 'down') {
     for (let i = 0; i < MAX_RETRIES && !tokens; i++) {
-      tokens = fetchTokensFromDaemon(transcriptPath);
+      tokens = await fetchTokensFromDaemon(transcriptPath);
       if (!tokens && i < MAX_RETRIES - 1) {
-        execSync(`sleep ${RETRY_DELAY / 1000}`);
+        await sleep(RETRY_DELAY);
       }
     }
   }

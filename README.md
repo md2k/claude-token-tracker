@@ -21,6 +21,7 @@ A lightweight Go daemon that tracks token usage for Claude Code sessions in real
 ## Requirements
 
 - Go 1.16+ (for building)
+- Node.js 18+ (the statusline queries the daemon with built-in `fetch`)
 - Claude Code CLI
 - A Nerd Font for proper icon display (recommended: [MesloLGS NF](https://github.com/romkatv/powerlevel10k#meslo-nerd-font-patched-for-powerlevel10k))
 
@@ -377,7 +378,7 @@ Configure your terminal to use the installed Nerd Font.
 
 ## How It Works
 
-1. **Auto-start**: Statusline script checks if daemon is running, starts it if needed
+1. **Auto-start**: Statusline script checks if daemon is running, starts it only when the port refuses connections (a slow reply means busy, not dead)
 2. **File watching**: Daemon uses `fsnotify` to watch transcript files for changes
 3. **Incremental parsing**: Only new lines since last read are parsed
 4. **In-memory cache**: Token counts stored in memory for instant API responses
@@ -392,7 +393,7 @@ Configure your terminal to use the installed Nerd Font.
 
 ## Performance
 
-- **Daemon mode**: ~75ms statusline update (includes curl overhead)
+- **Daemon mode**: ~75ms statusline update (daemon queried in-process, no curl spawn)
 - **API response time**: ~1-2ms (cached data)
 - **Fallback mode**: ~177ms (direct file parsing)
 - **Memory usage**: Minimal (~few MB for typical usage)
